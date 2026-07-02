@@ -317,6 +317,7 @@ pytest
 python scripts/run_eval.py
 python scripts/run_eval.py examples/evals/security_regression.json
 python scripts/run_eval.py examples/evals/tool_failure_regression.json
+python scripts/run_retrieval_eval.py
 ```
 
 观察：
@@ -324,6 +325,7 @@ python scripts/run_eval.py examples/evals/tool_failure_regression.json
 - 单测是否全绿。
 - golden eval 是否 `passed=5`。
 - tool failure eval 是否 `passed=4`。
+- retrieval challenge 是否 `passed=5`。
 - 每条 case 调用了哪些工具。
 
 ### 第 2 步：读一次退款 trace
@@ -378,7 +380,13 @@ data/local/support-agent-lab.db
 
 读 `memory/store.py` 和 `docs/retrieval-playbook.md`。
 
-小练习：故意删除 CJK bigram tokenizer，再跑 eval，看 `technical_audio_001` 为什么失败。
+运行：
+
+```bash
+python scripts/run_retrieval_eval.py
+```
+
+小练习：故意删除 CJK bigram tokenizer，再跑 retrieval challenge，看 `retrieval_audio_troubleshooting_cn_001` 为什么失败。然后打开 `trace.rewritten_queries` 和 `candidates_by_stage`，判断是 tokenizer、rewrite 还是 rerank 问题。
 
 ### 第 7 步：理解 eval
 
@@ -427,6 +435,14 @@ python scripts/run_eval.py
 - `order.get` 返回 `NOT_FOUND` 时不编造物流。
 - 跨用户订单访问返回 `FORBIDDEN` 时不泄露资源。
 - CRM 用户不存在时不编造客户或订单。
+
+`retrieval_challenge.json` 覆盖：
+
+- 退换货政策召回。
+- 物流延迟政策召回。
+- 发票抬头/税号政策召回。
+- 耳机故障 CJK 分词召回。
+- 账号安全与隐私政策召回。
 
 评测不只看最终自然语言，还检查：
 
@@ -483,7 +499,7 @@ python -m support_agent_lab.mcp.server
 | --- | --- | --- |
 | 意图识别错 | `trace.intent` | 增加 hard cases、改 classifier、加低置信澄清 |
 | 工具调用失败 | `trace.tool_results` 和 `docs/tool-failure-playbook.md` | 看错误码、schema、权限、timeout、幂等键；把高风险失败加入 tool failure eval |
-| 检索不全 | `trace.retrieval` | tokenizer、query rewrite、chunk、hybrid search、rerank |
+| 检索不全 | `trace.retrieval` 和 `python scripts/run_retrieval_eval.py` | tokenizer、query rewrite、chunk、hybrid search、rerank；把用户失败 query 加入 retrieval challenge |
 | 答案无引用 | `response.citations` | 强制 citation gate，不足时回答不确定或转人工 |
 | 重复建单 | `ToolBroker.idempotency_store` | 写工具必须带 idempotency key |
 | 越权/隐私风险 | `policy_findings` 和 monitor event | scope、tenant check、字段脱敏、人工升级 |
@@ -511,6 +527,7 @@ Demo API auth is intentionally lightweight: `X-Demo-User` and `X-Demo-Role` teac
 - 接入真实 LLM Gateway，并保留 deterministic tests。
 - 增加 SQLite/PostgreSQL persistence adapter。
 - 扩展 tool failure fault profiles：稳定模拟 timeout、上游 5xx、部分成功和熔断。
+- 扩展 retrieval challenge：hard negative、跨语言 query、metadata version filter、answerability rerank。
 - 增加 OpenTelemetry exporter。
 - Product Design brief 确认后，实现生产运维控制台 UI：会话回放、tool trace、RAG citation、eval report、monitor events。
 

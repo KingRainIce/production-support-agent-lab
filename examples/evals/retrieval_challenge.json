@@ -1,0 +1,66 @@
+[
+  {
+    "case_id": "retrieval_return_quality_cn_001",
+    "scenario": "Quality issue return request should retrieve the return policy.",
+    "locale": "zh-CN",
+    "query": "\u8033\u673a\u6709\u8d28\u91cf\u95ee\u9898\uff0c\u7b7e\u6536\u4e24\u5929\u540e\u53ef\u4ee5\u9000\u8d27\u5417\uff1f",
+    "expected": {
+      "required_doc_ids": ["return_policy_v3"],
+      "required_top_doc_id": "return_policy_v3",
+      "required_rewrite_terms": ["\u9000\u6362\u8d27", "\u8d28\u91cf\u95ee\u9898"],
+      "min_candidates": 1
+    },
+    "tags": ["retrieval", "rewrite", "refund"]
+  },
+  {
+    "case_id": "retrieval_shipping_delay_cn_001",
+    "scenario": "Shipping delay question should retrieve the shipping policy.",
+    "locale": "zh-CN",
+    "query": "\u7269\u6d41\u8d85\u8fc7\u627f\u8bfa\u65f6\u95f4\u8fd8\u6ca1\u6709\u66f4\u65b0\uff0c\u5e94\u8be5\u600e\u4e48\u5904\u7406\uff1f",
+    "expected": {
+      "required_doc_ids": ["shipping_policy_v2"],
+      "required_top_doc_id": "shipping_policy_v2",
+      "required_rewrite_terms": ["\u7269\u6d41"],
+      "min_candidates": 1
+    },
+    "tags": ["retrieval", "rewrite", "shipping"]
+  },
+  {
+    "case_id": "retrieval_invoice_title_cn_001",
+    "scenario": "Invoice title and tax id edits should retrieve the invoice policy.",
+    "locale": "zh-CN",
+    "query": "\u6211\u60f3\u4fee\u6539\u7535\u5b50\u53d1\u7968\u62ac\u5934\u548c\u7a0e\u53f7",
+    "expected": {
+      "required_doc_ids": ["invoice_policy_v1"],
+      "required_top_doc_id": "invoice_policy_v1",
+      "required_rewrite_terms": ["\u53d1\u7968"],
+      "min_candidates": 1
+    },
+    "tags": ["retrieval", "rewrite", "billing"]
+  },
+  {
+    "case_id": "retrieval_audio_troubleshooting_cn_001",
+    "scenario": "CJK phrase segmentation should retrieve the audio troubleshooting guide.",
+    "locale": "zh-CN",
+    "query": "\u8033\u673a\u5355\u8fb9\u65e0\u58f0\uff0c\u84dd\u7259\u8fde\u63a5\u4e0d\u4e0a",
+    "expected": {
+      "required_doc_ids": ["troubleshooting_audio_v1"],
+      "required_top_doc_id": "troubleshooting_audio_v1",
+      "required_rewrite_terms": ["\u8033\u673a", "\u6545\u969c"],
+      "min_candidates": 1
+    },
+    "tags": ["retrieval", "tokenizer", "technical_support"]
+  },
+  {
+    "case_id": "retrieval_account_security_cn_001",
+    "scenario": "Account security and privacy question should retrieve the security policy.",
+    "locale": "zh-CN",
+    "query": "\u8d26\u53f7\u5f02\u5e38\u767b\u5f55\uff0c\u80fd\u4e0d\u80fd\u663e\u793a\u5b8c\u6574\u624b\u673a\u53f7\u548c\u5730\u5740\uff1f",
+    "expected": {
+      "required_doc_ids": ["security_policy_v2"],
+      "required_top_doc_id": "security_policy_v2",
+      "min_candidates": 1
+    },
+    "tags": ["retrieval", "security", "privacy"]
+  }
+]

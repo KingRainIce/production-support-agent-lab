@@ -28,6 +28,23 @@
 
 如果 eval 报 `missing citation doc`，第一步就是看这个 trace。
 
+## Retrieval challenge
+
+端到端 eval 会同时受 intent、routing、tool、answer composition 影响。定位召回问题时，先跑 raw retrieval challenge：
+
+```bash
+python scripts/run_retrieval_eval.py
+```
+
+默认读取 `examples/evals/retrieval_challenge.json`。每个 case 会检查：
+
+- 必须召回哪些 `document_id`。
+- top-1 是否是预期文档。
+- query rewrite 是否包含关键扩展词。
+- candidate 数量是否低于最低要求。
+
+这组 challenge 的作用不是证明 RAG 已经生产完美，而是保护几个最容易被改坏的基础能力：中文分词、query rewrite、政策文档召回和 trace 可诊断性。
+
 ## 当前实现
 
 `KnowledgeIndex.search` 做了三件事：
@@ -60,6 +77,15 @@
 | 引用不支持答案 | 生成阶段没有绑定 citation | 强制 unsupported claim 检查 |
 | 引用过期政策 | metadata 未参与排序 | 加 effective/version filter |
 | 多语言差 | query rewrite 单语言 | 加双语 rewrite 或跨语言 embedding |
+
+## 如何把线上失败加入 challenge
+
+1. 从 monitor 或客服反馈里找到失败 query。
+2. 打开对应 `trace.retrieval`，确认是没有候选、top-1 错、还是 citation 没被回答使用。
+3. 把 query 加入 `examples/evals/retrieval_challenge.json`。
+4. 先让 case 失败，确认它能复现问题。
+5. 再改 tokenizer、rewrite、chunk、metadata filter 或 rerank。
+6. 跑 `python scripts/run_retrieval_eval.py` 和端到端 eval，确认召回修复没有破坏最终回答。
 
 ## 生产建议
 
