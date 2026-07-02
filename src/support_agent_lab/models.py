@@ -238,6 +238,32 @@ class EvalExpectation(BaseModel):
     policy_refs: list[str] = Field(default_factory=list)
 
 
+ToolFaultErrorCode = Literal[
+    "VALIDATION_ERROR",
+    "UNAUTHORIZED",
+    "FORBIDDEN",
+    "NOT_FOUND",
+    "CONFLICT",
+    "IDEMPOTENCY_CONFLICT",
+    "RATE_LIMITED",
+    "TIMEOUT",
+    "UPSTREAM_UNAVAILABLE",
+    "UPSTREAM_ERROR",
+    "INTERNAL_ERROR",
+    "TOOL_NOT_ALLOWED",
+    "TOOL_NOT_FOUND",
+]
+
+
+class EvalToolFault(BaseModel):
+    tool_name: str
+    error_code: ToolFaultErrorCode
+    message: str = "Injected eval tool fault."
+    retryable: bool = False
+    delay_ms: int = Field(default=0, ge=0, le=5000)
+    times: int = Field(default=1, ge=1, le=10)
+
+
 class EvalCase(BaseModel):
     case_id: str
     scenario: str
@@ -245,6 +271,7 @@ class EvalCase(BaseModel):
     user_id: str = "user_demo"
     turns: list[dict[str, str]]
     expected: EvalExpectation
+    tool_faults: list[EvalToolFault] = Field(default_factory=list)
     tags: list[str] = Field(default_factory=list)
 
 

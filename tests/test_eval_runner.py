@@ -33,5 +33,5 @@ async def test_tool_failure_regression_eval_passes():
 
     report = await run_cases(cases, container.orchestrator)
 
-    assert report.total == 4
-    assert report.passed == 4
+    assert report.total == 5
+    assert report.passed == 5

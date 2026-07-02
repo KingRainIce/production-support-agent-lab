@@ -7,6 +7,7 @@ from pathlib import Path
 
 from support_agent_lab.bootstrap import create_container
 from support_agent_lab.models import EvalCase, EvalCaseResult, EvalReport, ToolStatus, new_id
+from support_agent_lab.tools.registry import ToolFault, ToolFaultProfile, ToolRegistry
 
 
 def load_cases(path: str | Path) -> list[EvalCase]:
@@ -17,16 +18,21 @@ def load_cases(path: str | Path) -> list[EvalCase]:
 async def run_cases(cases: list[EvalCase], orchestrator) -> EvalReport:
     results: list[EvalCaseResult] = []
     for case in cases:
+        previous_fault_profile = orchestrator.tools.fault_profile
+        orchestrator.tools.fault_profile = _build_fault_profile(case, orchestrator.tools.registry)
         conversation_id = new_id("eval_conv")
         response = None
-        for turn in case.turns:
-            if turn["role"] != "user":
-                continue
-            response = await orchestrator.handle_message(
-                conversation_id=conversation_id,
-                user_id=case.user_id,
-                text=turn["content"],
-            )
+        try:
+            for turn in case.turns:
+                if turn["role"] != "user":
+                    continue
+                response = await orchestrator.handle_message(
+                    conversation_id=conversation_id,
+                    user_id=case.user_id,
+                    text=turn["content"],
+                )
+        finally:
+            orchestrator.tools.fault_profile = previous_fault_profile
         assert response is not None
         observed_tools = [
             tool.name for tool in response.trace.tool_results if tool.status == ToolStatus.success
@@ -82,6 +88,25 @@ def _check_case(
         if doc_id not in selected_doc_ids:
             failures.append(f"missing citation doc: {doc_id}")
     return failures
+
+
+def _build_fault_profile(case: EvalCase, registry: ToolRegistry) -> ToolFaultProfile | None:
+    if not case.tool_faults:
+        return None
+    profile = ToolFaultProfile()
+    for fault in case.tool_faults:
+        registry.get(fault.tool_name)
+        for _ in range(fault.times):
+            profile.add(
+                fault.tool_name,
+                ToolFault(
+                    error_code=fault.error_code,
+                    message=fault.message,
+                    retryable=fault.retryable,
+                    delay_ms=fault.delay_ms,
+                ),
+            )
+    return profile
 
 
 async def async_main(path: str) -> EvalReport:

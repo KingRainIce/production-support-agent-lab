@@ -94,10 +94,37 @@ class ToolAuditRecord:
 
 
 @dataclass
+class ToolFault:
+    error_code: str
+    message: str
+    retryable: bool = False
+    delay_ms: int = 0
+
+
+@dataclass
+class ToolFaultProfile:
+    faults_by_tool: dict[str, list[ToolFault]] = field(default_factory=dict)
+
+    def add(self, tool_name: str, fault: ToolFault) -> "ToolFaultProfile":
+        self.faults_by_tool.setdefault(tool_name, []).append(fault)
+        return self
+
+    def pop(self, tool_name: str) -> ToolFault | None:
+        faults = self.faults_by_tool.get(tool_name)
+        if not faults:
+            return None
+        fault = faults.pop(0)
+        if not faults:
+            self.faults_by_tool.pop(tool_name, None)
+        return fault
+
+
+@dataclass
 class ToolBroker:
     registry: ToolRegistry
     idempotency_store: dict[str, dict[str, Any]]
     audit_log: list[ToolAuditRecord] = field(default_factory=list)
+    fault_profile: ToolFaultProfile | None = None
 
     async def call(self, name: str, arguments: dict[str, Any], ctx: ToolContext) -> ToolResult:
         started = perf_counter()
@@ -113,6 +140,11 @@ class ToolBroker:
                 cached.latency_ms = self._elapsed_ms(started)
                 self._audit(name, arg_hash, cached)
                 return cached
+            fault = self._pop_fault(name)
+            if fault:
+                if fault.delay_ms:
+                    await asyncio.sleep(fault.delay_ms / 1000)
+                raise ToolError(fault.error_code, fault.message, retryable=fault.retryable)
             output = await asyncio.wait_for(
                 tool.handler(parsed, ctx),
                 timeout=tool.timeout_ms / 1000,
@@ -222,3 +254,8 @@ class ToolBroker:
 
     def _elapsed_ms(self, started: float) -> int:
         return int((perf_counter() - started) * 1000)
+
+    def _pop_fault(self, name: str) -> ToolFault | None:
+        if not self.fault_profile:
+            return None
+        return self.fault_profile.pop(name)

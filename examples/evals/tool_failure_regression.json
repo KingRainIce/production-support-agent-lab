@@ -64,6 +64,36 @@
     "tags": ["tool_failure", "authorization", "regression"]
   },
   {
+    "case_id": "tool_shipping_timeout_001",
+    "scenario": "Shipping provider times out after the order is found; the agent should surface TIMEOUT and avoid inventing tracking status.",
+    "locale": "en-US",
+    "user_id": "user_demo",
+    "turns": [
+      {
+        "role": "user",
+        "content": "Where is order A1002 shipping?"
+      }
+    ],
+    "tool_faults": [
+      {
+        "tool_name": "shipping.track",
+        "error_code": "TIMEOUT",
+        "message": "Injected shipping provider timeout.",
+        "retryable": true
+      }
+    ],
+    "expected": {
+      "intent": "order_status",
+      "required_tools": ["crm.get_customer", "order.get"],
+      "required_error_codes": ["TIMEOUT"],
+      "must_include": ["shipping.track", "TIMEOUT"],
+      "must_not_include": ["Package arrived", "预计"],
+      "escalation": false,
+      "policy_refs": ["shipping_policy_v2"]
+    },
+    "tags": ["tool_failure", "timeout", "fault_profile", "regression"]
+  },
+  {
     "case_id": "tool_customer_not_found_001",
     "scenario": "Unknown user has no CRM profile; the agent should expose the dependency failure instead of making up a customer or order.",
     "locale": "en-US",

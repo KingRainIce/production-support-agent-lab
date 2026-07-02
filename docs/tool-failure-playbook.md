@@ -38,6 +38,7 @@ python scripts/run_eval.py examples/evals/tool_failure_regression.json
 - 缺少订单号：应调用 `order.search` 并要求确认，不直接给物流节点。
 - 订单不存在：应暴露 `NOT_FOUND`，不编造物流。
 - 跨用户访问：应暴露 `FORBIDDEN`，不泄露另一个客户的物流单号。
+- 物流工具超时：应暴露 `TIMEOUT`，不编造最新物流节点。
 - CRM 用户不存在：应暴露依赖失败，不编造客户或订单。
 
 写 eval 时要注意：`required_tools` 只统计成功工具；失败工具不要放进去。比如 `order.get` 返回 `NOT_FOUND` 时，应使用 `required_error_codes: ["NOT_FOUND"]`，再用 `must_include` 或 `must_not_include` 检查回答是否正确降级。
@@ -62,15 +63,27 @@ python scripts/run_eval.py examples/evals/tool_failure_regression.json
   "turns": [
     {"role": "user", "content": "Where is order A1002 shipping?"}
   ],
+  "tool_faults": [
+    {
+      "tool_name": "shipping.track",
+      "error_code": "TIMEOUT",
+      "message": "Injected shipping provider timeout.",
+      "retryable": true
+    }
+  ],
   "expected": {
     "intent": "order_status",
+    "required_tools": ["crm.get_customer", "order.get"],
     "required_error_codes": ["TIMEOUT"],
-    "must_not_include": ["Package arrived", "delivered"],
+    "must_include": ["shipping.track", "TIMEOUT"],
+    "must_not_include": ["Package arrived", "delivered", "预计"],
     "escalation": false,
     "policy_refs": ["shipping_policy_v2"]
   },
-  "tags": ["tool_failure", "timeout", "regression"]
+  "tags": ["tool_failure", "timeout", "fault_profile", "regression"]
 }
 ```
 
-如果这个 case 需要模拟上游超时，不要在 eval 里硬编码 sleep。更好的做法是给工具层增加可注入的 fake provider 或 fault profile，让测试能稳定复现。
+`tool_faults` 会在单个 eval case 执行前注入到 `ToolBroker`，case 结束后恢复原状态。它发生在权限、schema 校验、幂等缓存读取之后、真实 handler 调用之前，所以可以稳定模拟上游失败，同时不会绕过工具治理边界。
+
+`tool_faults.error_code` 使用有限集合，`tool_name` 也会在构造 profile 时校验；如果写错工具名或错误码，eval 应该快速失败，而不是悄悄跑成无效 case。

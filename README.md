@@ -324,7 +324,7 @@ python scripts/run_retrieval_eval.py
 
 - 单测是否全绿。
 - golden eval 是否 `passed=5`。
-- tool failure eval 是否 `passed=4`。
+- tool failure eval 是否 `passed=5`。
 - retrieval challenge 是否 `passed=5`。
 - 每条 case 调用了哪些工具。
 
@@ -434,6 +434,7 @@ python scripts/run_eval.py
 - 缺少订单号时走 `order.search` 并要求确认。
 - `order.get` 返回 `NOT_FOUND` 时不编造物流。
 - 跨用户订单访问返回 `FORBIDDEN` 时不泄露资源。
+- `shipping.track` 注入 `TIMEOUT` 时不编造最新物流节点。
 - CRM 用户不存在时不编造客户或订单。
 
 `retrieval_challenge.json` 覆盖：
@@ -526,7 +527,7 @@ Demo API auth is intentionally lightweight: `X-Demo-User` and `X-Demo-Role` teac
 
 - 接入真实 LLM Gateway，并保留 deterministic tests。
 - 增加 SQLite/PostgreSQL persistence adapter。
-- 扩展 tool failure fault profiles：稳定模拟 timeout、上游 5xx、部分成功和熔断。
+- 扩展 tool failure fault profiles：继续覆盖 rate limit、上游 5xx、部分成功和熔断。
 - 扩展 retrieval challenge：hard negative、跨语言 query、metadata version filter、answerability rerank。
 - 增加 OpenTelemetry exporter。
 - Product Design brief 确认后，实现生产运维控制台 UI：会话回放、tool trace、RAG citation、eval report、monitor events。
