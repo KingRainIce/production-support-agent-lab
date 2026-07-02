@@ -219,6 +219,7 @@ class MonitorEvent(BaseModel):
     timestamp: datetime = Field(default_factory=utc_now)
     agent_version: str
     user_intent: IntentType
+    alert_key: str | None = None
     risk_level: RiskLevel
     grounded: bool
     policy_compliant: bool
@@ -226,6 +227,24 @@ class MonitorEvent(BaseModel):
     needs_human_review: bool = False
     failure_types: list[str] = Field(default_factory=list)
     summary: str
+
+
+class MonitorAlertStatus(str, Enum):
+    open = "open"
+    acknowledged = "acknowledged"
+    investigating = "investigating"
+    resolved = "resolved"
+    silenced = "silenced"
+
+
+class MonitorAlertTriageEvent(BaseModel):
+    id: str = Field(default_factory=lambda: new_id("triage"))
+    alert_key: str
+    status: MonitorAlertStatus | None = None
+    assignee_user_id: str | None = None
+    actor_user_id: str
+    note: str = ""
+    created_at: datetime = Field(default_factory=utc_now)
 
 
 class EvalToolOutputExpectation(BaseModel):

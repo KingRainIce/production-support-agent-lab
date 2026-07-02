@@ -11,7 +11,14 @@ from support_agent_lab.bootstrap import AppContainer, create_container
 from support_agent_lab.api.readiness import ReadinessResponse, check_readiness
 from support_agent_lab.memory.event_store import StoredEvent
 from support_agent_lab.memory.replay import MemoryReplayResult, replay_conversation_memory
-from support_agent_lab.models import AgentResponse, Message, MonitorEvent, new_id
+from support_agent_lab.models import (
+    AgentResponse,
+    Message,
+    MonitorAlertStatus,
+    MonitorAlertTriageEvent,
+    MonitorEvent,
+    new_id,
+)
 from support_agent_lab.monitoring.monitor import MonitorSummary, summarize_monitor_events
 
 
@@ -35,6 +42,12 @@ class ChatMessageResponse(BaseModel):
     trace_id: str
     handoff_required: bool
     citations: list[dict]
+
+
+class TriageMonitorAlertRequest(BaseModel):
+    status: MonitorAlertStatus | None = None
+    assignee_user_id: str | None = Field(default=None, max_length=128)
+    note: str = Field(default="", max_length=1000)
 
 
 container = create_container()
@@ -174,12 +187,65 @@ def create_app() -> FastAPI:
                 conversation_id=conversation_id,
                 limit=limit,
             )
-            return summarize_monitor_events(events)
+            triage_events = deps.event_store.list_monitor_alert_triage_events(
+                tenant_id=deps.settings.app_tenant_id,
+                limit=limit,
+            )
+            return summarize_monitor_events(events, triage_events=triage_events)
         if conversation_id:
             return summarize_monitor_events(
                 [event for event in deps.monitor.events if event.conversation_id == conversation_id][:limit]
             )
         return summarize_monitor_events(deps.monitor.events[:limit])
+
+    @app.get("/api/v1/admin/monitor/alerts/{alert_key}/triage")
+    def monitor_alert_triage_events(
+        alert_key: str,
+        deps: Annotated[AppContainer, Depends(get_container)],
+        actor: Annotated[RequestActor, Depends(get_request_actor)],
+        limit: Annotated[int, Query(ge=1, le=500)] = 100,
+    ) -> list[MonitorAlertTriageEvent]:
+        require_admin(actor)
+        if not deps.event_store:
+            raise HTTPException(status_code=404, detail="Event store is not configured")
+        return deps.event_store.list_monitor_alert_triage_events(
+            tenant_id=deps.settings.app_tenant_id,
+            alert_key=alert_key,
+            limit=limit,
+        )
+
+    @app.post("/api/v1/admin/monitor/alerts/{alert_key}/triage")
+    def triage_monitor_alert(
+        alert_key: str,
+        body: TriageMonitorAlertRequest,
+        deps: Annotated[AppContainer, Depends(get_container)],
+        actor: Annotated[RequestActor, Depends(get_request_actor)],
+    ) -> MonitorAlertTriageEvent:
+        require_admin(actor)
+        if not deps.event_store:
+            raise HTTPException(status_code=404, detail="Event store is not configured")
+        note = body.note.strip()
+        if body.status is None and body.assignee_user_id is None and not note:
+            raise HTTPException(status_code=400, detail="At least one triage field is required")
+        events = deps.event_store.list_monitor_events(
+            tenant_id=deps.settings.app_tenant_id,
+            limit=500,
+        )
+        summary = summarize_monitor_events(events)
+        if alert_key not in {alert.key for alert in summary.alerts}:
+            raise HTTPException(status_code=404, detail="Monitor alert not found")
+        triage_event = MonitorAlertTriageEvent(
+            alert_key=alert_key,
+            status=body.status,
+            assignee_user_id=body.assignee_user_id,
+            actor_user_id=actor.user_id,
+            note=note,
+        )
+        deps.event_store.append_monitor_alert_triage(
+            triage_event,
+            tenant_id=deps.settings.app_tenant_id,
+        )
+        return triage_event
 
     @app.post("/api/v1/admin/evals/golden")
     async def run_golden_eval(

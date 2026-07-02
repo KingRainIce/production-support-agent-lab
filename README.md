@@ -325,12 +325,30 @@ curl "http://127.0.0.1:8000/api/v1/admin/monitor/events?source=event_store&conve
   -H "X-Demo-Role: admin"
 ```
 
+确认并指派一个告警。注意：这不会修改原始 `monitor.reviewed` 事件，只会追加一条 `monitor.alert.triaged` 运营事件：
+
+```bash
+curl -X POST "http://127.0.0.1:8000/api/v1/admin/monitor/alerts/agent_2026_07_lab:general_question:PROMPT_INJECTION_ATTEMPT/triage" \
+  -H "Content-Type: application/json" \
+  -H "X-Demo-Role: admin" \
+  -d '{"status":"acknowledged","assignee_user_id":"backend-oncall","note":"已确认 prompt injection 风险，开始复盘 trace 并补 security eval"}'
+```
+
+查看告警处置历史：
+
+```bash
+curl "http://127.0.0.1:8000/api/v1/admin/monitor/alerts/agent_2026_07_lab:general_question:PROMPT_INJECTION_ATTEMPT/triage" \
+  -H "X-Demo-Role: admin"
+```
+
 返回里重点看：
 
 - `by_risk_level`：低/中/高风险会话占比是否异常。
 - `by_intent`：哪个业务意图正在变差。
 - `by_failure_type`：是越权、工具失败、prompt injection，还是 citation 不足。
 - `alerts`：按 `agent_version + intent + failure_type` 聚合后的 P0-P3 告警。
+- `alerts[].status` / `assignee_user_id`：告警是否已经有人接手。
+- `alerts[].new_events_since_triage`：ack 后是否又出现同类新事件；如果是 `true`，不要把它当成已解决。
 
 查看 append-only event log：
 
@@ -523,6 +541,19 @@ python scripts/run_monitor_eval.py
 
 小练习：先发一条 prompt injection，再用 `user_guest` 查 `A1001` 订单；随后分别调用 `/api/v1/admin/monitor/summary` 和 `/api/v1/admin/monitor/summary?source=event_store&conversation_id=...`，观察 `PROMPT_INJECTION_ATTEMPT` 如何聚合成 P1，`FORBIDDEN` 和 `TIMEOUT` 如何聚合成 P2。再尝试新增一个 truly critical 的 failure type，把它升级为 P0/P1，并同步更新 `monitor_regression.json`。
 
+### 第 8.5 步：从 alert 到 ack/triage
+
+线上 monitor 的闭环不是“看到告警就结束”。正确顺序是：
+
+1. 用 `/api/v1/admin/monitor/summary?source=event_store` 找到 `alerts[].key`。
+2. 用 `sample_run_ids` 查 `/api/v1/agent/runs/{run_id}`，确认 intent、route、tools、retrieval、policy 哪一步出问题。
+3. 用 `POST /api/v1/admin/monitor/alerts/{alert_key}/triage` 追加 ack/assign/note。
+4. 用 `/api/v1/admin/monitor/alerts/{alert_key}/triage` 查看处置历史。
+5. 把真实样本加入 `security_regression.json`、`tool_failure_regression.json`、`retrieval_challenge.json`、`routing_regression.json` 或 `monitor_regression.json`。
+6. 修复后跑相关 eval 和全量 `pytest`，再把状态改成 `resolved`。
+
+这里的设计故意是 append-only：`monitor.reviewed` 是不可改写的事实，`monitor.alert.triaged` 是后续运营动作。ack 只是“有人接手”，resolve 才表示“有修复、有验证、有回归样本”。
+
 ### 第 9 步：理解 LLM Gateway
 
 读 `llm/gateway.py`。
@@ -670,7 +701,7 @@ python -m support_agent_lab.mcp.server
 | 业务系统 | `HTTPBusinessClient` 调 CRM/OMS/Shipping/Ticketing API | 服务网格、熔断、重试预算、审计中心 |
 | 知识库 | `HTTPKnowledgeIndex` 调真实 knowledge service | pgvector/OpenSearch/reranker + answerability gate |
 | LLM | OpenAI Responses API provider | 多模型路由、fallback、成本预算 |
-| Monitor | 同进程 summary + SQLite event-store summary + monitor regression gate | Queue consumer + warehouse + alert manager/dashboard |
+| Monitor | 同进程 summary + SQLite event-store summary + append-only alert triage + monitor regression gate | Queue consumer + warehouse + alert manager/dashboard |
 | Policy | 规则引擎 + routing override | PII detector + RBAC + compliance workflow |
 | Event store | SQLite append-only event log | Postgres/Kafka event stream |
 | Tool audit | ToolBroker audit records | append-only audit table + SIEM |

@@ -7,7 +7,14 @@ from typing import Any
 
 from pydantic import BaseModel
 
-from support_agent_lab.models import AgentRunTrace, Message, MonitorEvent, new_id, utc_now
+from support_agent_lab.models import (
+    AgentRunTrace,
+    Message,
+    MonitorAlertTriageEvent,
+    MonitorEvent,
+    new_id,
+    utc_now,
+)
 
 
 class StoredEvent(BaseModel):
@@ -62,6 +69,18 @@ class SQLiteEventStore:
             conversation_id=event.conversation_id,
             user_id=None,
             event_type="monitor.reviewed",
+            payload=event.model_dump(mode="json"),
+        )
+
+    def append_monitor_alert_triage(
+        self,
+        event: MonitorAlertTriageEvent,
+        tenant_id: str = "demo_tenant",
+    ) -> StoredEvent:
+        return self.append(
+            tenant_id=tenant_id,
+            event_type="monitor.alert.triaged",
+            user_id=event.actor_user_id,
             payload=event.model_dump(mode="json"),
         )
 
@@ -155,6 +174,26 @@ class SQLiteEventStore:
             limit=limit,
         )
         return [MonitorEvent.model_validate(event.payload) for event in events]
+
+    def list_monitor_alert_triage_events(
+        self,
+        *,
+        tenant_id: str | None = None,
+        alert_key: str | None = None,
+        limit: int = 500,
+    ) -> list[MonitorAlertTriageEvent]:
+        events = self.list_events(
+            tenant_id=tenant_id,
+            event_type="monitor.alert.triaged",
+            limit=limit,
+        )
+        triage_events = [
+            MonitorAlertTriageEvent.model_validate(event.payload)
+            for event in events
+        ]
+        if alert_key is None:
+            return triage_events
+        return [event for event in triage_events if event.alert_key == alert_key]
 
     def health_check(self) -> None:
         with self._connect() as conn:

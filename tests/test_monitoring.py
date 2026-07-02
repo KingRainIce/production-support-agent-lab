@@ -1,8 +1,19 @@
+from datetime import timedelta
+
 import pytest
 
 from support_agent_lab.bootstrap import create_container
 from support_agent_lab.llm.gateway import LLMGateway, LLMRequest, LLMResponse
-from support_agent_lab.models import IntentType, LLMCallTrace, MonitorEvent, RiskLevel
+from support_agent_lab.models import (
+    IntentType,
+    LLMCallTrace,
+    MonitorAlertStatus,
+    MonitorAlertTriageEvent,
+    MonitorEvent,
+    RiskLevel,
+    utc_now,
+)
+from support_agent_lab.monitoring.monitor import monitor_alert_key, summarize_monitor_events
 
 
 class LeakyProvider:
@@ -132,3 +143,48 @@ def test_monitor_summary_alerts_on_human_review_pressure():
     assert summary.human_review_rate == 1.0
     assert summary.alerts[0].severity == "P2"
     assert "QUALITY_REVIEW" in summary.alerts[0].reason
+
+
+def test_monitor_summary_marks_new_events_after_triage():
+    first_seen = utc_now()
+    first_event = MonitorEvent(
+        conversation_id="conv_timeout_1",
+        run_id="run_timeout_1",
+        timestamp=first_seen,
+        agent_version="agent_test",
+        user_intent=IntentType.order_status,
+        risk_level=RiskLevel.medium,
+        grounded=True,
+        policy_compliant=True,
+        needs_human_review=True,
+        failure_types=["TIMEOUT"],
+        summary="shipping timeout",
+    )
+    second_event = first_event.model_copy(
+        update={
+            "id": "mon_timeout_2",
+            "conversation_id": "conv_timeout_2",
+            "run_id": "run_timeout_2",
+            "timestamp": first_seen + timedelta(minutes=5),
+        }
+    )
+    alert_key = monitor_alert_key(first_event)
+    triage_event = MonitorAlertTriageEvent(
+        alert_key=alert_key,
+        status=MonitorAlertStatus.acknowledged,
+        assignee_user_id="backend-oncall",
+        actor_user_id="admin_user",
+        note="ack before the next timeout",
+        created_at=first_seen + timedelta(minutes=1),
+    )
+
+    summary = summarize_monitor_events(
+        [first_event, second_event],
+        triage_events=[triage_event],
+    )
+
+    alert = summary.alerts[0]
+    assert alert.key == alert_key
+    assert alert.status == MonitorAlertStatus.acknowledged
+    assert alert.new_events_since_triage is True
+    assert alert.sample_event_ids == [first_event.id, "mon_timeout_2"]

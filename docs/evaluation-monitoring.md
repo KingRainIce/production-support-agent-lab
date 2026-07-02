@@ -172,6 +172,18 @@ curl "http://127.0.0.1:8000/api/v1/admin/monitor/events?source=event_store&conve
   -H "X-Demo-Role: admin"
 ```
 
+告警处置也走 append-only event log：
+
+```bash
+curl -X POST "http://127.0.0.1:8000/api/v1/admin/monitor/alerts/agent_2026_07_lab:general_question:PROMPT_INJECTION_ATTEMPT/triage" \
+  -H "Content-Type: application/json" \
+  -H "X-Demo-Role: admin" \
+  -d '{"status":"acknowledged","assignee_user_id":"backend-oncall","note":"确认 policy alert，补 security regression"}'
+
+curl "http://127.0.0.1:8000/api/v1/admin/monitor/alerts/agent_2026_07_lab:general_question:PROMPT_INJECTION_ATTEMPT/triage" \
+  -H "X-Demo-Role: admin"
+```
+
 它会输出：
 
 - `by_risk_level`：风险等级分布。
@@ -194,6 +206,7 @@ curl "http://127.0.0.1:8000/api/v1/admin/monitor/events?source=event_store&conve
 - `conversation_id` / `run_id`：定位会话和单次 agent run。
 - `agent_version`：发布回滚和 canary 对比的分组键。
 - `user_intent`：判断风险集中在哪类业务。
+- `alert_key`：告警聚合键。当前为 `agent_version:user_intent:failure_key`，规模化后建议改为 URL-safe hash id，并保留原始 key 作为可读字段。
 - `risk_level`：`low`、`medium`、`high`、`critical`。
 - `grounded`：回答是否有 citation 或属于必须人工处理的安全/投诉路径。
 - `policy_compliant` / `pii_leak`：判断合规风险和 P0 事件。
@@ -201,6 +214,25 @@ curl "http://127.0.0.1:8000/api/v1/admin/monitor/events?source=event_store&conve
 - `failure_types`：例如 `PROMPT_INJECTION_ATTEMPT`、`FORBIDDEN`、`TIMEOUT`。
 
 生产中建议把这些字段原样进入数据仓库或指标系统，不要只保存最终回答文本。最终回答适合做抽样质检，结构化事件才适合做实时告警、聚合和回归测试。
+
+`MonitorAlertTriageEvent` 是运营动作事件：
+
+- `alert_key`：要处置的告警。
+- `status`：`acknowledged`、`investigating`、`resolved`、`silenced` 等。
+- `assignee_user_id`：当前 owner。
+- `actor_user_id`：谁做了这次处置。
+- `note`：脱敏后的判断和下一步。
+- `created_at`：用于投影当前状态，也用于计算 MTTA/MTTR。
+
+不要把 triage 写回 `monitor.reviewed`。原始观测事实不可改写，运营状态通过追加事件投影出来。
+
+`MonitorAlert` 字段速查：
+
+- `key`：聚合键，不是数据库主键。
+- `sample_event_ids` / `sample_run_ids`：抽样复盘入口，不代表全部受影响请求。
+- `first_seen_at` / `last_seen_at`：判断持续时间和是否复发。
+- `status` / `assignee_user_id`：当前处置状态。
+- `new_events_since_triage`：ack 后是否又有同 key 新事件；为 `true` 时应继续排查或 reopen。
 
 ## 告警与处置 Runbook
 
@@ -212,12 +244,15 @@ curl "http://127.0.0.1:8000/api/v1/admin/monitor/events?source=event_store&conve
 | `grounded_rate` 下降 | 低于最近 7 天 p50 的 90% | 跑 `scripts/run_retrieval_eval.py`，检查 query rewrite、tokenizer、rerank 和知识库版本 |
 | `human_review_rate` 上升 | 高于基线 2 倍 | 判断是投诉真实增长、policy 误杀，还是工具失败导致保守转人工 |
 
-线上事件进入 eval 的流程应该固定：
+处置流程应固定为 `detect -> ack -> triage -> mitigate -> eval -> resolve`：
 
-1. 从 `/api/v1/admin/monitor/events?source=event_store` 导出失败样本。
-2. 找到对应 `/api/v1/agent/runs/{run_id}`，确认 intent、route、tools、retrieval、policy 哪一步退化。
-3. 把样本加入最贴近的回归集：`routing_regression.json`、`tool_failure_regression.json`、`retrieval_challenge.json`、`security_regression.json` 或 `monitor_regression.json`。
-4. 修代码或配置后先跑相关 eval，再跑全量 `pytest` 和 `scripts/run_eval.py`。
+1. 从 `/api/v1/admin/monitor/summary?source=event_store` 找到 alert key。
+2. 立刻追加 triage event，至少记录 `status=acknowledged`、owner 和脱敏 note。
+3. 从 `sample_run_ids` 找到 `/api/v1/agent/runs/{run_id}`，确认 intent、route、tools、retrieval、policy 哪一步退化。
+4. 从 `/api/v1/admin/monitor/events?source=event_store` 导出失败样本。
+5. 把样本加入最贴近的回归集：`routing_regression.json`、`tool_failure_regression.json`、`retrieval_challenge.json`、`security_regression.json` 或 `monitor_regression.json`。
+6. 修代码或配置后先跑相关 eval，再跑全量 `pytest` 和 `scripts/run_eval.py`。
+7. 验证后追加 `status=resolved` 的 triage event。ack 不等于 resolve。
 
 ## 不要过度依赖 LLM-as-judge
 

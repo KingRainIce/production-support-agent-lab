@@ -9,7 +9,7 @@
 | ConversationMemory | 进程内状态 + SQLite event replay | PostgreSQL + Redis |
 | Business tools | HTTPBusinessClient 调真实 CRM/OMS/Shipping/Ticketing API | 服务网格、熔断、重试预算、审计中心 |
 | Knowledge | HTTPKnowledgeIndex 调真实 knowledge service | pgvector + BM25 + reranker |
-| OnlineMonitorAgent | 同进程 summary + SQLite event-store summary | Queue worker + OLAP/dashboard |
+| OnlineMonitorAgent | 同进程 summary + SQLite event-store summary + append-only triage events | Queue worker + OLAP/dashboard |
 | LLMGateway | OpenAI Responses API | Provider routing + fallback + budget |
 | SQLiteEventStore | local SQLite events | Postgres append-only events + Kafka stream |
 | Tool audit | 内存 audit_log | append-only audit table |
@@ -32,6 +32,7 @@
 - `tickets`
 - `audit_logs`
 - `monitor_events`
+- `monitor_alert_triage_events`
 
 所有表都带 `tenant_id`。
 
@@ -73,6 +74,10 @@ monitor.review
 - policy violation rate
 - CSAT
 - repeated contact rate
+- time to acknowledge
+- time to resolve
+- open alert count
+- repeated alert rate
 
 ## 发布策略
 

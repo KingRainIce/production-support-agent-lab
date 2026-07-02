@@ -2,11 +2,19 @@ from __future__ import annotations
 
 from collections import Counter, defaultdict
 from collections.abc import Sequence
+from datetime import datetime
 from typing import Literal
 
 from pydantic import BaseModel, Field
 
-from support_agent_lab.models import AgentResponse, MonitorEvent, RiskLevel, ToolStatus
+from support_agent_lab.models import (
+    AgentResponse,
+    MonitorAlertStatus,
+    MonitorAlertTriageEvent,
+    MonitorEvent,
+    RiskLevel,
+    ToolStatus,
+)
 
 
 class MonitorAlert(BaseModel):
@@ -14,7 +22,16 @@ class MonitorAlert(BaseModel):
     key: str
     count: int
     reason: str
+    first_seen_at: datetime
+    last_seen_at: datetime
+    sample_event_ids: list[str] = Field(default_factory=list)
     sample_run_ids: list[str] = Field(default_factory=list)
+    status: MonitorAlertStatus = MonitorAlertStatus.open
+    assignee_user_id: str | None = None
+    last_triage_event_id: str | None = None
+    last_triage_at: datetime | None = None
+    last_triage_note: str | None = None
+    new_events_since_triage: bool = False
 
 
 class MonitorSummary(BaseModel):
@@ -60,6 +77,8 @@ class OnlineMonitorAgent:
             failure_types=[*(finding.code for finding in policy_failures), *(tool.error_code or "TOOL_FAILED" for tool in tool_failures)],
             summary=self._summarize(response),
         )
+        if event.failure_types or not event.grounded or not event.policy_compliant or event.needs_human_review:
+            event.alert_key = monitor_alert_key(event)
         self.events.append(event)
         return event
 
@@ -72,7 +91,10 @@ class OnlineMonitorAgent:
         return f"intent={intent}; tools={tools}; handoff={response.handoff_required}"
 
 
-def summarize_monitor_events(events: Sequence[MonitorEvent]) -> MonitorSummary:
+def summarize_monitor_events(
+    events: Sequence[MonitorEvent],
+    triage_events: Sequence[MonitorAlertTriageEvent] | None = None,
+) -> MonitorSummary:
     total = len(events)
     if total == 0:
         return MonitorSummary(
@@ -95,14 +117,15 @@ def summarize_monitor_events(events: Sequence[MonitorEvent]) -> MonitorSummary:
     for event in events:
         if not event.failure_types and event.grounded and event.policy_compliant and not event.needs_human_review:
             continue
-        failure_key = "+".join(sorted(event.failure_types)) or "QUALITY_REVIEW"
-        key = f"{event.agent_version}:{event.user_intent.value}:{failure_key}"
+        key = event.alert_key or monitor_alert_key(event)
         alerts_by_key[key].append(event)
 
     alerts = [
         _build_alert(key, grouped)
         for key, grouped in alerts_by_key.items()
     ]
+    if triage_events:
+        apply_monitor_triage(alerts, triage_events)
     alerts.sort(key=lambda alert: (_severity_rank(alert.severity), -alert.count, alert.key))
     return MonitorSummary(
         total_events=total,
@@ -116,6 +139,32 @@ def summarize_monitor_events(events: Sequence[MonitorEvent]) -> MonitorSummary:
     )
 
 
+def apply_monitor_triage(
+    alerts: list[MonitorAlert],
+    triage_events: Sequence[MonitorAlertTriageEvent],
+) -> None:
+    alerts_by_key = {alert.key: alert for alert in alerts}
+    for event in sorted(triage_events, key=lambda item: item.created_at):
+        alert = alerts_by_key.get(event.alert_key)
+        if not alert:
+            continue
+        if event.status is not None:
+            alert.status = event.status
+        if event.assignee_user_id is not None:
+            alert.assignee_user_id = event.assignee_user_id
+        if event.note:
+            alert.last_triage_note = event.note
+        alert.last_triage_event_id = event.id
+        alert.last_triage_at = event.created_at
+        if alert.last_seen_at > event.created_at:
+            alert.new_events_since_triage = True
+
+
+def monitor_alert_key(event: MonitorEvent) -> str:
+    failure_key = "+".join(sorted(event.failure_types)) or "QUALITY_REVIEW"
+    return f"{event.agent_version}:{event.user_intent.value}:{failure_key}"
+
+
 def _build_alert(key: str, events: list[MonitorEvent]) -> MonitorAlert:
     severity = _severity_for(events)
     failures = Counter(failure for event in events for failure in event.failure_types)
@@ -126,6 +175,9 @@ def _build_alert(key: str, events: list[MonitorEvent]) -> MonitorAlert:
         key=key,
         count=len(events),
         reason=reason,
+        first_seen_at=min(event.timestamp for event in events),
+        last_seen_at=max(event.timestamp for event in events),
+        sample_event_ids=[event.id for event in events[:3]],
         sample_run_ids=[event.run_id for event in events[:3]],
     )
 
