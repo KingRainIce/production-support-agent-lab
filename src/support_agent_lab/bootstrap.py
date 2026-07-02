@@ -34,6 +34,9 @@ def create_container() -> AppContainer:
     settings.validate_production_ready()
     memory = ConversationMemory()
     monitor = OnlineMonitorAgent()
+    event_store = SQLiteEventStore.from_url(settings.app_database_url)
+    if settings.is_production and event_store is None:
+        raise RuntimeError("Production mode requires a configured event store")
     if settings.is_production:
         store = None
         knowledge = HTTPKnowledgeIndex(
@@ -47,18 +50,21 @@ def create_container() -> AppContainer:
             timeout_ms=settings.app_http_timeout_ms,
         )
         registry = create_http_registry(business_client)
-        idempotency_store = {}
+        if event_store is None:
+            raise RuntimeError("Production mode requires a configured idempotency store")
+        idempotency_store = event_store
     else:
         store = DemoStore.seeded()
         business_client = None
         knowledge = KnowledgeIndex()
         registry = create_registry(store, knowledge)
         idempotency_store = store.idempotency
-    tools = ToolBroker(registry=registry, idempotency_store=idempotency_store)
+    tools = ToolBroker(
+        registry=registry,
+        idempotency_store=idempotency_store,
+        audit_sink=event_store,
+    )
     llm = create_llm_gateway(settings)
-    event_store = SQLiteEventStore.from_url(settings.app_database_url)
-    if settings.is_production and event_store is None:
-        raise RuntimeError("Production mode requires a configured event store")
     orchestrator = SupportAgentOrchestrator(
         tenant_id=settings.app_tenant_id,
         memory=memory,

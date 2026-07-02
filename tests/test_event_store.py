@@ -9,7 +9,7 @@ from support_agent_lab.memory.store import ConversationMemory, KnowledgeIndex
 from support_agent_lab.models import MonitorAlertStatus, MonitorAlertTriageEvent
 from support_agent_lab.monitoring.monitor import OnlineMonitorAgent, summarize_monitor_events
 from support_agent_lab.tools.business_tools import create_registry
-from support_agent_lab.tools.registry import ToolBroker
+from support_agent_lab.tools.registry import Actor, ToolBroker, ToolContext
 
 
 @pytest.mark.asyncio
@@ -254,6 +254,111 @@ def test_event_store_list_events_filters_by_tenant(tmp_path):
     assert tenant_events[0].payload == {"tenant": "a"}
 
 
+@pytest.mark.asyncio
+async def test_sqlite_tool_idempotency_replays_after_restart(tmp_path):
+    event_store = SQLiteEventStore(tmp_path / "events.db")
+    first_store = DemoStore.seeded()
+    first_broker = ToolBroker(
+        registry=create_registry(first_store, KnowledgeIndex()),
+        idempotency_store=event_store,
+        audit_sink=event_store,
+    )
+    ctx = _tool_context(idempotency_key="persisted-ticket")
+    payload = {
+        "customer_id": "cust_1001",
+        "title": "Persisted ticket",
+        "description": "The second broker should replay this result.",
+    }
+
+    first = await first_broker.call("ticket.create", payload, ctx)
+    restarted_store = DemoStore.seeded()
+    restarted_broker = ToolBroker(
+        registry=create_registry(restarted_store, KnowledgeIndex()),
+        idempotency_store=event_store,
+        audit_sink=event_store,
+    )
+    replay = await restarted_broker.call("ticket.create", payload, ctx)
+    audit_records = event_store.list_tool_audit_records(
+        tenant_id="demo_tenant",
+        tool_name="ticket.create",
+    )
+
+    assert first.status == "success"
+    assert replay.status == "success"
+    assert replay.data == first.data
+    assert restarted_store.tickets == {}
+    assert [record.replayed for record in audit_records] == [False, True]
+    assert all(record.request_id == "req_tool" for record in audit_records)
+    assert all(record.trace_id == "trace_tool" for record in audit_records)
+    assert all(record.idempotency_key_hash for record in audit_records)
+
+
+@pytest.mark.asyncio
+async def test_sqlite_tool_idempotency_conflicts_after_restart(tmp_path):
+    event_store = SQLiteEventStore(tmp_path / "events.db")
+    first_broker = ToolBroker(
+        registry=create_registry(DemoStore.seeded(), KnowledgeIndex()),
+        idempotency_store=event_store,
+    )
+    ctx = _tool_context(idempotency_key="same-key-different-body")
+
+    first = await first_broker.call(
+        "ticket.create",
+        {
+            "customer_id": "cust_1001",
+            "title": "Original ticket",
+            "description": "Original payload.",
+        },
+        ctx,
+    )
+    restarted_broker = ToolBroker(
+        registry=create_registry(DemoStore.seeded(), KnowledgeIndex()),
+        idempotency_store=event_store,
+    )
+    conflict = await restarted_broker.call(
+        "ticket.create",
+        {
+            "customer_id": "cust_1001",
+            "title": "Changed ticket",
+            "description": "Changed payload.",
+        },
+        ctx,
+    )
+
+    assert first.status == "success"
+    assert conflict.status == "failed"
+    assert conflict.error_code == "IDEMPOTENCY_CONFLICT"
+
+
+@pytest.mark.asyncio
+async def test_tool_idempotency_hash_uses_canonical_parsed_payload(tmp_path):
+    event_store = SQLiteEventStore(tmp_path / "events.db")
+    broker = ToolBroker(
+        registry=create_registry(DemoStore.seeded(), KnowledgeIndex()),
+        idempotency_store=event_store,
+    )
+    ctx = _tool_context(idempotency_key="canonical-defaults")
+    omitted_default = {
+        "customer_id": "cust_1001",
+        "title": "Canonical ticket",
+        "description": "Default priority is omitted.",
+    }
+    explicit_default = {
+        "customer_id": "cust_1001",
+        "title": "Canonical ticket",
+        "description": "Default priority is omitted.",
+        "priority": "normal",
+        "tags": [],
+    }
+
+    first = await broker.call("ticket.create", omitted_default, ctx)
+    replay = await broker.call("ticket.create", explicit_default, ctx)
+
+    assert first.status == "success"
+    assert replay.status == "success"
+    assert replay.data == first.data
+
+
 def _build_orchestrator(
     event_store: SQLiteEventStore,
     *,
@@ -274,4 +379,18 @@ def _build_orchestrator(
         llm=create_default_llm_gateway(),
         event_store=event_store,
         monitor=OnlineMonitorAgent(),
+    )
+
+
+def _tool_context(idempotency_key: str) -> ToolContext:
+    return ToolContext(
+        actor=Actor(
+            user_id="user_demo",
+            tenant_id="demo_tenant",
+            scopes=["ticket:write"],
+        ),
+        request_id="req_tool",
+        trace_id="trace_tool",
+        tenant_id="demo_tenant",
+        idempotency_key=idempotency_key,
     )

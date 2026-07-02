@@ -313,3 +313,26 @@ async def test_fault_profile_does_not_break_idempotent_write_replay():
     assert replay.status == ToolStatus.success
     assert replay.data["ticket_id"] == first.data["ticket_id"]
     assert container.tools.fault_profile.faults_by_tool["ticket.create"]
+
+
+@pytest.mark.asyncio
+async def test_unknown_tool_call_is_audited():
+    container = create_container()
+    ctx = ToolContext(
+        actor=Actor(
+            user_id="user_demo",
+            tenant_id="demo_tenant",
+            scopes=["ticket:write"],
+        ),
+        request_id="req_unknown",
+        trace_id="trace_unknown",
+        tenant_id="demo_tenant",
+    )
+
+    result = await container.tools.call("not.registered", {}, ctx)
+
+    assert result.status == ToolStatus.failed
+    assert result.error_code == "TOOL_NOT_FOUND"
+    assert container.tools.audit_log[-1].tool_name == "not.registered"
+    assert container.tools.audit_log[-1].request_id == "req_unknown"
+    assert container.tools.audit_log[-1].trace_id == "trace_unknown"

@@ -11,8 +11,8 @@
 | Knowledge | HTTPKnowledgeIndex 调真实 knowledge service | pgvector + BM25 + reranker |
 | OnlineMonitorAgent | 同进程 summary + SQLite event-store summary + append-only triage events | Queue worker + OLAP/dashboard |
 | LLMGateway | OpenAI Responses API | Provider routing + fallback + budget |
-| SQLiteEventStore | local SQLite events | Postgres append-only events + Kafka stream |
-| Tool audit | 内存 audit_log | append-only audit table |
+| SQLiteEventStore | local/production SQLite events + tool idempotency records + tool audit records | Postgres append-only events + Kafka stream + durable outbox |
+| Tool audit | SQLite `tool_audit_records` + 进程内 recent audit_log | SIEM / warehouse / audit center |
 | PolicyEngine | regex + rule | PII detector + RBAC + compliance engine |
 | API auth | `X-Internal-Auth` + `X-Actor-*` trusted gateway | mTLS/JWT/HMAC-signed actor claims + tenant isolation |
 | Trace | Pydantic object | OpenTelemetry spans |
@@ -27,6 +27,7 @@
 - `messages`
 - `agent_runs`
 - `tool_calls`
+- `tool_idempotency`
 - `knowledge_documents`
 - `knowledge_chunks`
 - `tickets`

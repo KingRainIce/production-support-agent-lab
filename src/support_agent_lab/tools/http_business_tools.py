@@ -237,22 +237,37 @@ def create_http_registry(client: HTTPBusinessClient) -> ToolRegistry:
 
 
 async def _get_customer(input_: GetCustomerInput, ctx: ToolContext, client: HTTPBusinessClient) -> CustomerOutput:
+    if input_.user_id != ctx.actor.user_id and "crm:admin" not in ctx.actor.scopes:
+        raise ToolError(FORBIDDEN, "Cannot read another user's customer profile")
     payload = await client.get(f"/customers/{input_.user_id}", ctx=ctx)
     return CustomerOutput.model_validate(payload)
 
 
 async def _search_orders(input_: SearchOrdersInput, ctx: ToolContext, client: HTTPBusinessClient) -> SearchOrdersOutput:
-    params = {"customer_id": input_.customer_id}
+    customer_id = await _resolve_customer_id(
+        input_.customer_id,
+        ctx,
+        client,
+        admin_scope="order:admin",
+    )
+    params = {"customer_id": customer_id}
     if input_.status:
         params["status"] = input_.status
     payload = await client.get("/orders", params=params, ctx=ctx)
     orders = payload.get("orders", payload) if isinstance(payload, dict) else payload
-    return SearchOrdersOutput(orders=[OrderOutput.model_validate(item) for item in orders])
+    validated_orders = [OrderOutput.model_validate(item) for item in orders]
+    if "order:admin" not in ctx.actor.scopes:
+        for order in validated_orders:
+            if order.customer_id != customer_id:
+                raise ToolError(FORBIDDEN, "Order resource does not belong to actor")
+    return SearchOrdersOutput(orders=validated_orders)
 
 
 async def _get_order(input_: GetOrderInput, ctx: ToolContext, client: HTTPBusinessClient) -> OrderOutput:
     payload = await client.get(f"/orders/{input_.order_id}", ctx=ctx)
-    return OrderOutput.model_validate(payload)
+    order = OrderOutput.model_validate(payload)
+    await _ensure_order_owned(order.customer_id, ctx, client)
+    return order
 
 
 async def _track_shipment(
@@ -261,6 +276,8 @@ async def _track_shipment(
     client: HTTPBusinessClient,
 ) -> TrackShipmentOutput:
     payload = await client.get(f"/shipments/{input_.logistics_id}", ctx=ctx)
+    if isinstance(payload, dict) and payload.get("customer_id"):
+        await _ensure_order_owned(str(payload["customer_id"]), ctx, client)
     return TrackShipmentOutput.model_validate(payload)
 
 
@@ -269,7 +286,15 @@ async def _create_ticket(
     ctx: ToolContext,
     client: HTTPBusinessClient,
 ) -> CreateTicketOutput:
-    payload = await client.post("/tickets", json=input_.model_dump(), ctx=ctx)
+    customer_id = await _resolve_customer_id(
+        input_.customer_id,
+        ctx,
+        client,
+        admin_scope="crm:admin",
+    )
+    body = input_.model_dump()
+    body["customer_id"] = customer_id
+    payload = await client.post("/tickets", json=body, ctx=ctx)
     return CreateTicketOutput.model_validate(payload)
 
 
@@ -281,3 +306,34 @@ async def _kb_search(input_: KBSearchInput, ctx: ToolContext, client: HTTPBusine
     )
     hits = payload.get("hits", payload) if isinstance(payload, dict) else payload
     return KBSearchOutput(hits=hits)
+
+
+async def _actor_customer(ctx: ToolContext, client: HTTPBusinessClient) -> CustomerOutput:
+    return await _get_customer(GetCustomerInput(user_id=ctx.actor.user_id), ctx, client)
+
+
+async def _resolve_customer_id(
+    customer_id: str,
+    ctx: ToolContext,
+    client: HTTPBusinessClient,
+    *,
+    admin_scope: str,
+) -> str:
+    actor_customer = await _actor_customer(ctx, client)
+    if customer_id == "SELF":
+        return actor_customer.customer_id
+    if customer_id != actor_customer.customer_id and admin_scope not in ctx.actor.scopes:
+        raise ToolError(FORBIDDEN, "Customer resource does not belong to actor")
+    return customer_id
+
+
+async def _ensure_order_owned(
+    customer_id: str,
+    ctx: ToolContext,
+    client: HTTPBusinessClient,
+) -> None:
+    if "order:admin" in ctx.actor.scopes:
+        return
+    actor_customer = await _actor_customer(ctx, client)
+    if customer_id != actor_customer.customer_id:
+        raise ToolError(FORBIDDEN, "Order resource does not belong to actor")

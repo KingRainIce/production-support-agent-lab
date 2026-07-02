@@ -92,7 +92,7 @@ async def get_customer(input_: GetCustomerInput, ctx: ToolContext, store: DemoSt
 
 
 async def search_orders(input_: SearchOrdersInput, ctx: ToolContext, store: DemoStore) -> SearchOrdersOutput:
-    customer_id = _resolve_customer_id(input_.customer_id, ctx, store)
+    customer_id = _resolve_customer_id(input_.customer_id, ctx, store, admin_scope="order:admin")
     orders = []
     for order in store.orders.values():
         if order["customer_id"] != customer_id:
@@ -128,7 +128,7 @@ async def track_shipment(input_: TrackShipmentInput, ctx: ToolContext, store: De
 
 
 async def create_ticket(input_: CreateTicketInput, ctx: ToolContext, store: DemoStore) -> CreateTicketOutput:
-    customer_id = _resolve_customer_id(input_.customer_id, ctx, store)
+    customer_id = _resolve_customer_id(input_.customer_id, ctx, store, admin_scope="crm:admin")
     ticket_id = f"T{len(store.tickets) + 1001}"
     created_at = datetime.now(timezone.utc).isoformat()
     store.tickets[ticket_id] = {
@@ -244,12 +244,18 @@ def _customer_for_actor(ctx: ToolContext, store: DemoStore) -> dict:
     return customer
 
 
-def _resolve_customer_id(customer_id: str, ctx: ToolContext, store: DemoStore) -> str:
+def _resolve_customer_id(
+    customer_id: str,
+    ctx: ToolContext,
+    store: DemoStore,
+    *,
+    admin_scope: str,
+) -> str:
     actor_customer = _customer_for_actor(ctx, store)
     expected = actor_customer["customer_id"]
     if customer_id == "SELF":
         return expected
-    if customer_id != expected and "crm:admin" not in ctx.actor.scopes:
+    if customer_id != expected and admin_scope not in ctx.actor.scopes:
         raise ToolError(FORBIDDEN, "Customer resource does not belong to actor")
     return customer_id
 

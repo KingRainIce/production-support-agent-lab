@@ -8,7 +8,7 @@
 
 这个项目有两条明确路径：
 
-- `production`：真实 OpenAI Responses API、真实业务 HTTP API、真实知识库 HTTP API、SQLite 事件日志。配置缺失会 fail fast，不会偷偷退回本地假数据。
+- `production`：真实 OpenAI Responses API、真实业务 HTTP API、真实知识库 HTTP API、SQLite 事件日志、持久工具幂等记录和工具审计。配置缺失会 fail fast，不会偷偷退回本地假数据。
 - `local`：只用于学习和测试的 deterministic provider + fixtures，方便先理解系统骨架。
 
 本地学习路径是为了让你先学清楚 Agent 工程的骨架：
@@ -225,7 +225,7 @@ http://127.0.0.1:8000/api/v1/ready
 9. `LLMGateway.generate` 在 production 调 OpenAI Responses API；local mode 记录 deterministic trace。
 10. `PolicyEngine.check_output` 检查是否有违规承诺。
 11. `OnlineMonitorAgent.review` 生成 monitor event。
-12. `SQLiteEventStore` 落盘 user message、assistant message、agent run 和 monitor event。
+12. `SQLiteEventStore` 落盘 user message、assistant message、agent run、monitor event、工具幂等结果和 tool audit。
 
 成功回答类似：
 
@@ -704,7 +704,7 @@ python -m support_agent_lab.mcp.server
 | 工具调用失败 | `trace.tool_results` 和 `docs/tool-failure-playbook.md` | 看错误码、schema、权限、timeout、幂等键；把高风险失败加入 tool failure eval |
 | 检索不全 | `trace.retrieval` 和 `python scripts/run_retrieval_eval.py` | tokenizer、query rewrite、chunk、hybrid search、rerank；把用户失败 query 加入 retrieval challenge |
 | 答案无引用 | `response.citations` | 强制 citation gate，不足时回答不确定或转人工 |
-| 重复建单 | `ToolBroker.idempotency_store` | 写工具必须带 idempotency key |
+| 重复建单 | SQLite `tool_idempotency` + `trace.tool_results` | 写工具必须带 idempotency key；相同 key 重启后也应 replay |
 | 越权/隐私风险 | `policy_findings` 和 monitor event | scope、tenant check、字段脱敏、人工升级 |
 | 线上质量漂移 | `/api/v1/admin/monitor/summary?source=event_store` | 按 agent version、intent、failure type 聚合，并把真实失败样本沉淀回 monitor eval |
 
@@ -718,8 +718,8 @@ python -m support_agent_lab.mcp.server
 | LLM | OpenAI Responses API provider | 多模型路由、fallback、成本预算 |
 | Monitor | 同进程 summary + SQLite event-store summary + append-only alert triage + monitor regression gate | Queue consumer + warehouse + alert manager/dashboard |
 | Policy | 规则引擎 + routing override | PII detector + RBAC + compliance workflow |
-| Event store | SQLite append-only event log | Postgres/Kafka event stream |
-| Tool audit | ToolBroker audit records | append-only audit table + SIEM |
+| Event store | SQLite append-only event log + tool idempotency records | Postgres/Kafka event stream + durable outbox |
+| Tool audit | SQLite tool audit records + in-process recent audit_log | SIEM / warehouse / audit center |
 | API | FastAPI service | API service + worker service + autoscaling |
 
 Local API auth is intentionally lightweight: `X-Demo-User` and `X-Demo-Role` teach the boundary. Production mode uses a trusted gateway principal and rejects missing `X-Internal-Auth`.

@@ -22,7 +22,7 @@ APP_READINESS_DEEP_CHECKS=true
 APP_DATABASE_URL=sqlite:///./data/production/support-agent-lab.db
 ```
 
-`APP_DATABASE_URL` currently supports SQLite. That is enough for a single-instance deployment or staging environment. For multi-instance production, replace `SQLiteEventStore` with a Postgres/Kafka-backed implementation before scaling horizontally.
+`APP_DATABASE_URL` currently supports SQLite. It stores the append-only event log, monitor triage events, tool idempotency records, and tool audit records. That is enough for a single-instance deployment or staging environment. For multi-instance production, replace `SQLiteEventStore` with a Postgres/Kafka-backed implementation before scaling horizontally.
 
 ## Business API contract
 
@@ -38,7 +38,17 @@ APP_DATABASE_URL=sqlite:///./data/production/support-agent-lab.db
 | `GET` | `/knowledge/search?query=<text>&limit=<n>` | Search knowledge base snippets. |
 | `GET` | `/health` | Return 2xx when the business API can serve authenticated tool calls. |
 
-The adapter sends these headers on every request:
+Minimal response shapes:
+
+- `GET /customers/{user_id}` returns `customer_id`, `name`, `tier`, optional `email_masked` / `phone_masked`, and `verified`.
+- `GET /orders` returns `{"orders": [...]}` or a bare order list. Each order contains `order_id`, `customer_id`, `status`, `product`, `amount`, `currency`, optional `delivered_at` / `logistics_id`, and `returnable`.
+- `GET /orders/{order_id}` returns one order object with the same order fields.
+- `GET /shipments/{logistics_id}` returns `logistics_id`, `status`, `latest_event`, and `eta`. If it also returns `customer_id`, the adapter performs an extra ownership check.
+- `POST /tickets` receives `customer_id`, `title`, `description`, `priority`, and `tags`; it returns `ticket_id`, `status`, and `created_at`.
+
+The Agent may send `customer_id: "SELF"` in tool arguments. In production the HTTP adapter resolves that value through `GET /customers/{actor_user_id}` before calling `/orders` or `/tickets`, so your business API should not receive the literal string `SELF`.
+
+The adapter sends these headers on every tool request:
 
 ```text
 Authorization: Bearer <APP_BUSINESS_API_KEY>
@@ -51,7 +61,11 @@ X-Trace-Id: <agent run>
 Idempotency-Key: <for write tools>
 ```
 
-Your backend should enforce tenant isolation and resource ownership. The Agent still has route-level `allowed_tools`, but production authorization must live in the business service too.
+`/health` is a readiness probe, not an actor-scoped tool call. It sends service authentication plus tenant/request/trace headers so infrastructure can verify dependency reachability without pretending to be an end user.
+
+Production HTTP tools normalize upstream failures before the model sees them: `401 -> UNAUTHORIZED`, `403 -> FORBIDDEN`, `404 -> NOT_FOUND`, `409 -> CONFLICT`, `429 -> RATE_LIMITED`, `5xx -> UPSTREAM_ERROR`, timeout -> `TIMEOUT`, network failure -> `UPSTREAM_UNAVAILABLE`, invalid JSON -> `UPSTREAM_ERROR`.
+
+Your backend should still enforce tenant isolation and resource ownership. The Agent has route-level `allowed_tools`, `ToolBroker` enforces scopes, and the HTTP adapter performs basic defense-in-depth checks, but production authorization must live in the business service too.
 
 ## API authentication
 
@@ -92,6 +106,8 @@ Example release engineer:
 X-Actor-Roles: admin
 X-Actor-Scopes: eval:run,events:read
 ```
+
+Business admin scopes are separate from management API scopes. `crm:admin` can read another user's customer profile; `order:admin` can read/search another customer's orders. `roles=admin` alone does not grant either.
 
 ## MCP
 
@@ -159,3 +175,15 @@ curl "http://127.0.0.1:8000/api/v1/ready?deep=false"
 - `APP_DATABASE_URL=sqlite:///...` until another event-store adapter is implemented
 
 If any are missing, unsupported, or still look like placeholders such as `replace_with...`, `your_...`, or `example.com`, startup raises a `RuntimeError`. This is intentional.
+
+## Production smoke test
+
+Do not prove production mode by checking only that the container starts. Verify:
+
+- `.env` uses `APP_ENV=production` and `APP_REQUIRE_PRODUCTION=true`.
+- Business and knowledge URLs are real internal services, not local fixtures or placeholder domains.
+- Removing `OPENAI_API_KEY`, `APP_BUSINESS_API_BASE_URL`, or `APP_KNOWLEDGE_API_BASE_URL` makes startup fail.
+- `GET /api/v1/ready?deep=true` reaches OpenAI, Business API `/health`, Knowledge API `/health`, and the SQLite event store.
+- A production `/api/v1/chat/messages` request creates matching `X-Trace-Id` / `X-Request-Id` entries in your business backend logs.
+- `X-Demo-User` / `X-Demo-Role` do not authenticate production requests.
+- Repeating a write tool call with the same idempotency key after process restart replays the first result instead of creating a second ticket.

@@ -6,14 +6,16 @@ import json
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from time import perf_counter
-from typing import Any
+from typing import Any, Literal, Protocol
 
 from pydantic import BaseModel, ValidationError
 
 from support_agent_lab.models import ToolResult, ToolStatus, new_id
 from support_agent_lab.tools.errors import (
+    CONFLICT,
     FORBIDDEN,
     IDEMPOTENCY_CONFLICT,
+    INTERNAL_ERROR,
     TIMEOUT,
     ToolError,
     VALIDATION_ERROR,
@@ -87,10 +89,75 @@ class ToolRegistry:
 class ToolAuditRecord:
     id: str
     tool_name: str
+    tenant_id: str
+    actor_user_id: str
+    request_id: str
+    trace_id: str
     argument_hash: str
     status: ToolStatus
     latency_ms: int
     error_code: str | None
+    idempotency_key_hash: str | None = None
+    replayed: bool = False
+
+
+@dataclass
+class IdempotencyDecision:
+    status: Literal["reserved", "replay", "conflict", "in_progress"]
+    result: ToolResult | None = None
+
+
+class ToolIdempotencyStore(Protocol):
+    def reserve(self, key: str, arg_hash: str) -> IdempotencyDecision:
+        ...
+
+    def complete(self, key: str, arg_hash: str, result: ToolResult) -> None:
+        ...
+
+    def release(self, key: str, arg_hash: str) -> None:
+        ...
+
+
+class ToolAuditSink(Protocol):
+    def append_tool_audit(self, record: ToolAuditRecord) -> None:
+        ...
+
+
+@dataclass
+class InMemoryToolIdempotencyStore:
+    entries: dict[str, dict[str, Any]]
+
+    def reserve(self, key: str, arg_hash: str) -> IdempotencyDecision:
+        existing = self.entries.get(key)
+        if not existing:
+            self.entries[key] = {
+                "arg_hash": arg_hash,
+                "status": "in_progress",
+                "result": None,
+            }
+            return IdempotencyDecision(status="reserved")
+        if existing["arg_hash"] != arg_hash:
+            return IdempotencyDecision(status="conflict")
+        result = existing.get("result")
+        if result:
+            return IdempotencyDecision(status="replay", result=ToolResult.model_validate(result))
+        return IdempotencyDecision(status="in_progress")
+
+    def complete(self, key: str, arg_hash: str, result: ToolResult) -> None:
+        self.entries[key] = {
+            "arg_hash": arg_hash,
+            "status": "completed",
+            "result": result.model_dump(mode="json"),
+        }
+
+    def release(self, key: str, arg_hash: str) -> None:
+        existing = self.entries.get(key)
+        if (
+            existing
+            and existing.get("arg_hash") == arg_hash
+            and existing.get("status") == "in_progress"
+        ):
+            self.entries.pop(key, None)
 
 
 @dataclass
@@ -122,23 +189,31 @@ class ToolFaultProfile:
 @dataclass
 class ToolBroker:
     registry: ToolRegistry
-    idempotency_store: dict[str, dict[str, Any]]
+    idempotency_store: dict[str, dict[str, Any]] | ToolIdempotencyStore
     audit_log: list[ToolAuditRecord] = field(default_factory=list)
+    audit_sink: ToolAuditSink | None = None
     fault_profile: ToolFaultProfile | None = None
+
+    def __post_init__(self) -> None:
+        if isinstance(self.idempotency_store, dict):
+            self.idempotency_store = InMemoryToolIdempotencyStore(self.idempotency_store)
 
     async def call(self, name: str, arguments: dict[str, Any], ctx: ToolContext) -> ToolResult:
         started = perf_counter()
-        tool = self.registry.get(name)
         arg_hash = self._hash(arguments)
+        tool: ToolDefinition | None = None
+        reserved_key: str | None = None
         try:
+            tool = self.registry.get(name)
             self._authorize(tool, ctx)
             parsed = tool.input_model.model_validate(arguments)
+            arg_hash = self._hash(parsed.model_dump(mode="json"))
             if not tool.idempotent:
                 self._require_idempotency(ctx)
-            cached = self._read_idempotency(tool, ctx, arg_hash)
+            cached, reserved_key = self._reserve_idempotency(tool, ctx, arg_hash)
             if cached:
                 cached.latency_ms = self._elapsed_ms(started)
-                self._audit(name, arg_hash, cached)
+                self._audit(name, arg_hash, cached, ctx, replayed=True)
                 return cached
             fault = self._pop_fault(name)
             if fault:
@@ -156,8 +231,8 @@ class ToolBroker:
                 data=validated.model_dump(),
                 latency_ms=self._elapsed_ms(started),
             )
-            self._store_idempotency(tool, ctx, arg_hash, result)
-            self._audit(name, arg_hash, result)
+            self._complete_idempotency(reserved_key, arg_hash, result)
+            self._audit(name, arg_hash, result, ctx)
             return result
         except ValidationError as exc:
             result = ToolResult(
@@ -173,7 +248,7 @@ class ToolBroker:
                 name=name,
                 status=ToolStatus.failed,
                 error_code=TIMEOUT,
-                error_message=f"Tool {name} exceeded {tool.timeout_ms}ms",
+                error_message=f"Tool {name} exceeded {tool.timeout_ms if tool else 0}ms",
                 retryable=True,
                 latency_ms=self._elapsed_ms(started),
             )
@@ -186,7 +261,17 @@ class ToolBroker:
                 retryable=exc.retryable,
                 latency_ms=self._elapsed_ms(started),
             )
-        self._audit(name, arg_hash, result)
+        except Exception as exc:
+            result = ToolResult(
+                name=name,
+                status=ToolStatus.failed,
+                error_code=INTERNAL_ERROR,
+                error_message=str(exc),
+                retryable=False,
+                latency_ms=self._elapsed_ms(started),
+            )
+        self._release_idempotency(reserved_key, arg_hash)
+        self._audit(name, arg_hash, result, ctx)
         return result
 
     def _authorize(self, tool: ToolDefinition, ctx: ToolContext) -> None:
@@ -200,54 +285,77 @@ class ToolBroker:
         if not ctx.idempotency_key:
             raise ToolError(VALIDATION_ERROR, "Write tool requires idempotency_key")
 
-    def _read_idempotency(
+    def _reserve_idempotency(
         self,
         tool: ToolDefinition,
         ctx: ToolContext,
         arg_hash: str,
-    ) -> ToolResult | None:
+    ) -> tuple[ToolResult | None, str | None]:
         if tool.idempotent or not ctx.idempotency_key:
-            return None
+            return None, None
         key = self._idempotency_key(tool.name, ctx)
-        existing = self.idempotency_store.get(key)
-        if not existing:
-            return None
-        if existing["arg_hash"] != arg_hash:
+        decision = self.idempotency_store.reserve(key, arg_hash)
+        if decision.status == "reserved":
+            return None, key
+        if decision.status == "replay" and decision.result:
+            return decision.result, None
+        if decision.status == "conflict":
             raise ToolError(IDEMPOTENCY_CONFLICT, "Same idempotency key used with different payload")
-        return ToolResult.model_validate(existing["result"])
+        raise ToolError(CONFLICT, "Same idempotency key is already in progress", retryable=True)
 
-    def _store_idempotency(
+    def _complete_idempotency(
         self,
-        tool: ToolDefinition,
-        ctx: ToolContext,
+        reserved_key: str | None,
         arg_hash: str,
         result: ToolResult,
     ) -> None:
-        if tool.idempotent or not ctx.idempotency_key:
+        if not reserved_key:
             return
-        self.idempotency_store[self._idempotency_key(tool.name, ctx)] = {
-            "arg_hash": arg_hash,
-            "result": result.model_dump(mode="json"),
-        }
+        self.idempotency_store.complete(reserved_key, arg_hash, result)
+
+    def _release_idempotency(self, reserved_key: str | None, arg_hash: str) -> None:
+        if reserved_key:
+            self.idempotency_store.release(reserved_key, arg_hash)
 
     def _idempotency_key(self, tool_name: str, ctx: ToolContext) -> str:
-        return f"{ctx.tenant_id}:{ctx.actor.user_id}:{tool_name}:{ctx.idempotency_key}"
+        key_hash = self._hash_text(ctx.idempotency_key or "")
+        return f"{ctx.tenant_id}:{ctx.actor.user_id}:{tool_name}:{key_hash}"
 
-    def _audit(self, name: str, arg_hash: str, result: ToolResult) -> None:
-        self.audit_log.append(
-            ToolAuditRecord(
-                id=new_id("audit"),
-                tool_name=name,
-                argument_hash=arg_hash,
-                status=result.status,
-                latency_ms=result.latency_ms,
-                error_code=result.error_code,
-            )
+    def _audit(
+        self,
+        name: str,
+        arg_hash: str,
+        result: ToolResult,
+        ctx: ToolContext,
+        *,
+        replayed: bool = False,
+    ) -> None:
+        record = ToolAuditRecord(
+            id=new_id("audit"),
+            tool_name=name,
+            tenant_id=ctx.tenant_id,
+            actor_user_id=ctx.actor.user_id,
+            request_id=ctx.request_id,
+            trace_id=ctx.trace_id,
+            argument_hash=arg_hash,
+            status=result.status,
+            latency_ms=result.latency_ms,
+            error_code=result.error_code,
+            idempotency_key_hash=(
+                self._hash_text(ctx.idempotency_key) if ctx.idempotency_key else None
+            ),
+            replayed=replayed,
         )
+        self.audit_log.append(record)
+        if self.audit_sink:
+            self.audit_sink.append_tool_audit(record)
 
     def _hash(self, arguments: dict[str, Any]) -> str:
         payload = json.dumps(arguments, ensure_ascii=False, sort_keys=True)
         return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+    def _hash_text(self, value: str) -> str:
+        return hashlib.sha256(value.encode("utf-8")).hexdigest()
 
     def _elapsed_ms(self, started: float) -> int:
         return int((perf_counter() - started) * 1000)

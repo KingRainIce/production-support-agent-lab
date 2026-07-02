@@ -1,17 +1,20 @@
+import json
+
 import httpx
 import pytest
 
+from support_agent_lab.models import ToolStatus
 from support_agent_lab.tools.errors import RATE_LIMITED, UPSTREAM_ERROR, ToolError
-from support_agent_lab.tools.http_business_tools import HTTPBusinessClient
-from support_agent_lab.tools.registry import Actor, ToolContext
+from support_agent_lab.tools.http_business_tools import HTTPBusinessClient, create_http_registry
+from support_agent_lab.tools.registry import Actor, ToolBroker, ToolContext
 
 
-def _ctx() -> ToolContext:
+def _ctx(scopes: list[str] | None = None) -> ToolContext:
     return ToolContext(
         actor=Actor(
             user_id="user_123",
             tenant_id="tenant_live",
-            scopes=["crm:read"],
+            scopes=scopes or ["crm:read"],
         ),
         request_id="req_123",
         trace_id="run_123",
@@ -79,3 +82,162 @@ async def test_http_business_client_maps_invalid_json_to_upstream_error():
 
     assert exc_info.value.code == UPSTREAM_ERROR
     assert exc_info.value.retryable is True
+
+
+@pytest.mark.asyncio
+async def test_http_registry_resolves_self_for_order_search_before_upstream_call():
+    seen_customer_ids = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/customers/user_123":
+            return httpx.Response(
+                200,
+                json={
+                    "customer_id": "C123",
+                    "name": "Lin",
+                    "tier": "gold",
+                    "verified": True,
+                },
+            )
+        if request.url.path == "/orders":
+            seen_customer_ids.append(request.url.params["customer_id"])
+            return httpx.Response(
+                200,
+                json={
+                    "orders": [
+                        {
+                            "order_id": "A1001",
+                            "customer_id": "C123",
+                            "status": "paid",
+                            "product": "Headphones",
+                            "amount": 19900,
+                            "currency": "CNY",
+                            "returnable": True,
+                        }
+                    ]
+                },
+            )
+        return httpx.Response(404)
+
+    broker = _http_broker(handler)
+
+    result = await broker.call(
+        "order.search",
+        {"customer_id": "SELF"},
+        _ctx(scopes=["crm:read", "order:read"]),
+    )
+
+    assert result.status == ToolStatus.success
+    assert seen_customer_ids == ["C123"]
+
+
+@pytest.mark.asyncio
+async def test_http_registry_resolves_self_for_ticket_create_before_upstream_call():
+    seen_ticket_bodies = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/customers/user_123":
+            return httpx.Response(
+                200,
+                json={
+                    "customer_id": "C123",
+                    "name": "Lin",
+                    "tier": "gold",
+                    "verified": True,
+                },
+            )
+        if request.url.path == "/tickets":
+            seen_ticket_bodies.append(json.loads(request.content.decode()))
+            return httpx.Response(
+                200,
+                json={
+                    "ticket_id": "T9001",
+                    "status": "open",
+                    "created_at": "2026-07-02T00:00:00+00:00",
+                },
+            )
+        return httpx.Response(404)
+
+    broker = _http_broker(handler)
+
+    result = await broker.call(
+        "ticket.create",
+        {
+            "customer_id": "SELF",
+            "title": "Need help",
+            "description": "Create this for my own customer record.",
+        },
+        _ctx(scopes=["crm:read", "ticket:write"]),
+    )
+
+    assert result.status == ToolStatus.success
+    assert seen_ticket_bodies[0]["customer_id"] == "C123"
+
+
+@pytest.mark.asyncio
+async def test_http_registry_rejects_cross_user_customer_lookup_before_upstream_call():
+    calls = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(str(request.url))
+        return httpx.Response(200, json={})
+
+    broker = _http_broker(handler)
+
+    result = await broker.call(
+        "crm.get_customer",
+        {"user_id": "other_user"},
+        _ctx(scopes=["crm:read"]),
+    )
+
+    assert result.status == ToolStatus.failed
+    assert result.error_code == "FORBIDDEN"
+    assert calls == []
+
+
+@pytest.mark.asyncio
+async def test_http_registry_rejects_order_payload_for_other_customer():
+    async def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/orders/A1001":
+            return httpx.Response(
+                200,
+                json={
+                    "order_id": "A1001",
+                    "customer_id": "C999",
+                    "status": "paid",
+                    "product": "Headphones",
+                    "amount": 19900,
+                    "currency": "CNY",
+                    "returnable": True,
+                },
+            )
+        if request.url.path == "/customers/user_123":
+            return httpx.Response(
+                200,
+                json={
+                    "customer_id": "C123",
+                    "name": "Lin",
+                    "tier": "gold",
+                    "verified": True,
+                },
+            )
+        return httpx.Response(404)
+
+    broker = _http_broker(handler)
+
+    result = await broker.call(
+        "order.get",
+        {"order_id": "A1001"},
+        _ctx(scopes=["crm:read", "order:read"]),
+    )
+
+    assert result.status == ToolStatus.failed
+    assert result.error_code == "FORBIDDEN"
+
+
+def _http_broker(handler) -> ToolBroker:
+    client = HTTPBusinessClient(
+        base_url="https://business.internal.test",
+        transport=httpx.MockTransport(handler),
+    )
+    return ToolBroker(registry=create_http_registry(client), idempotency_store={})

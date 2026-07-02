@@ -60,12 +60,20 @@ ToolDefinition(
 lookup tool
   -> authorize scopes and tenant
   -> validate input schema
-  -> require idempotency key for write tools
+  -> reserve idempotency key for write tools
   -> apply timeout
   -> validate output schema
-  -> store idempotent result
+  -> persist idempotency result
   -> append audit record
 ```
+
+### Tool audit boundary
+
+`ToolBroker` records every tool call in an in-process recent `audit_log` and, when an audit sink is configured, persists it to SQLite `tool_audit_records`.
+
+Audit records include `audit_id`, `tenant_id`, `actor_user_id`, `request_id`, `trace_id`, `tool_name`, `argument_hash`, `status`, `latency_ms`, `error_code`, `idempotency_key_hash`, and whether the result was replayed from idempotency storage.
+
+They intentionally do not store raw arguments, raw idempotency keys, PII, tokens, or full upstream payloads. In scaled production, ship the same record shape to an append-only audit table, SIEM, or data warehouse.
 
 ## 为什么写操作必须幂等
 
@@ -176,6 +184,8 @@ async def call_from_gateway(session, tool_name: str, arguments: dict):
 
 角色不是权限。`roles=["admin"]` 只能打开 admin API endpoint；工具越权必须靠 `crm:admin`、`order:admin` 这类 scope 显式授权。
 
+`customer_id: "SELF"` 是 Agent 计划里的内部占位符。本地工具会把它解析成当前 actor 的 customer id；生产 HTTP adapter 会先调用 `GET /customers/{actor_user_id}` 解析，再请求 `/orders` 或 `/tickets`。真实业务后端不应收到字面值 `SELF`。
+
 ## 幂等键规范
 
 生产里不要让 MCP adapter 自动猜幂等键。gateway 或客户端应为每个业务写操作生成稳定 operation id：
@@ -191,6 +201,13 @@ Idempotency-Key: <tenant>:<session>:<client-operation-id>
 - key 的存储维度至少包含 tenant、actor user、tool name 和 key。
 - TTL 取决于业务风险，工单类一般可保留 24 小时到 7 天。
 - 下游业务 API 也应接收 `Idempotency-Key`，不要只在 Agent 层做一次幂等。
+
+Chat API path 和 MCP gateway path 的幂等来源不同：
+
+- 普通 `/chat/messages` 编排会为写工具生成稳定 key，保证同一 conversation、user、tool、arguments 的重试不会重复建单。
+- 生产 MCP gateway 必须从客户端或 gateway 显式传入业务 operation id；不要让 gateway mode 自动猜 key。
+
+无论哪条路径，`ToolBroker` 都会按 tenant + actor + tool + idempotency key hash 做持久去重；相同 key + 不同 canonical payload 会返回 `IDEMPOTENCY_CONFLICT`。
 
 ## 错误码与 Agent 行为
 

@@ -12,9 +12,12 @@ from support_agent_lab.models import (
     Message,
     MonitorAlertTriageEvent,
     MonitorEvent,
+    ToolResult,
+    ToolStatus,
     new_id,
     utc_now,
 )
+from support_agent_lab.tools.registry import IdempotencyDecision, ToolAuditRecord
 
 
 class StoredEvent(BaseModel):
@@ -83,6 +86,138 @@ class SQLiteEventStore:
             user_id=event.actor_user_id,
             payload=event.model_dump(mode="json"),
         )
+
+    def reserve(self, key: str, arg_hash: str) -> IdempotencyDecision:
+        now = utc_now().isoformat()
+        with self._connect() as conn:
+            conn.execute("begin immediate")
+            row = conn.execute(
+                """
+                select scope_key, argument_hash, status, result_json
+                from tool_idempotency
+                where scope_key = ?
+                """,
+                (key,),
+            ).fetchone()
+            if not row:
+                conn.execute(
+                    """
+                    insert into tool_idempotency (
+                      scope_key, argument_hash, status, result_json, created_at, updated_at
+                    ) values (?, ?, ?, ?, ?, ?)
+                    """,
+                    (key, arg_hash, "in_progress", None, now, now),
+                )
+                return IdempotencyDecision(status="reserved")
+            if row["argument_hash"] != arg_hash:
+                return IdempotencyDecision(status="conflict")
+            if row["status"] == "completed" and row["result_json"]:
+                return IdempotencyDecision(
+                    status="replay",
+                    result=ToolResult.model_validate(json.loads(row["result_json"])),
+                )
+            return IdempotencyDecision(status="in_progress")
+
+    def complete(self, key: str, arg_hash: str, result: ToolResult) -> None:
+        now = utc_now().isoformat()
+        with self._connect() as conn:
+            conn.execute(
+                """
+                update tool_idempotency
+                set status = ?, result_json = ?, updated_at = ?
+                where scope_key = ? and argument_hash = ? and status = ?
+                """,
+                (
+                    "completed",
+                    json.dumps(result.model_dump(mode="json"), ensure_ascii=False, sort_keys=True),
+                    now,
+                    key,
+                    arg_hash,
+                    "in_progress",
+                ),
+            )
+
+    def release(self, key: str, arg_hash: str) -> None:
+        with self._connect() as conn:
+            conn.execute(
+                """
+                delete from tool_idempotency
+                where scope_key = ? and argument_hash = ? and status = ?
+                """,
+                (key, arg_hash, "in_progress"),
+            )
+
+    def append_tool_audit(self, record: ToolAuditRecord) -> None:
+        with self._connect() as conn:
+            conn.execute(
+                """
+                insert into tool_audit_records (
+                  id, tenant_id, actor_user_id, request_id, trace_id, tool_name,
+                  argument_hash, status, latency_ms, error_code,
+                  idempotency_key_hash, replayed, created_at
+                ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    record.id,
+                    record.tenant_id,
+                    record.actor_user_id,
+                    record.request_id,
+                    record.trace_id,
+                    record.tool_name,
+                    record.argument_hash,
+                    record.status.value,
+                    record.latency_ms,
+                    record.error_code,
+                    record.idempotency_key_hash,
+                    int(record.replayed),
+                    utc_now().isoformat(),
+                ),
+            )
+
+    def list_tool_audit_records(
+        self,
+        *,
+        tenant_id: str | None = None,
+        tool_name: str | None = None,
+        limit: int = 100,
+    ) -> list[ToolAuditRecord]:
+        sql = """
+            select id, tenant_id, actor_user_id, request_id, trace_id, tool_name,
+                   argument_hash, status, latency_ms, error_code,
+                   idempotency_key_hash, replayed
+            from tool_audit_records
+        """
+        clauses: list[str] = []
+        params: list[Any] = []
+        if tenant_id:
+            clauses.append("tenant_id = ?")
+            params.append(tenant_id)
+        if tool_name:
+            clauses.append("tool_name = ?")
+            params.append(tool_name)
+        if clauses:
+            sql += " where " + " and ".join(clauses)
+        sql += " order by rowid asc limit ?"
+        params.append(limit)
+        with self._connect() as conn:
+            rows = conn.execute(sql, params).fetchall()
+        return [
+            ToolAuditRecord(
+                id=row["id"],
+                tenant_id=row["tenant_id"],
+                actor_user_id=row["actor_user_id"],
+                request_id=row["request_id"],
+                trace_id=row["trace_id"],
+                tool_name=row["tool_name"],
+                argument_hash=row["argument_hash"],
+                status=ToolStatus(row["status"]),
+                latency_ms=row["latency_ms"],
+                error_code=row["error_code"],
+                idempotency_key_hash=row["idempotency_key_hash"],
+                replayed=bool(row["replayed"]),
+            )
+            for row in rows
+        ]
 
     def append(
         self,
@@ -221,6 +356,16 @@ class SQLiteEventStore:
             missing = sorted(required - columns)
             if missing:
                 raise RuntimeError(f"events table missing columns: {', '.join(missing)}")
+            tool_idempotency = conn.execute(
+                "select name from sqlite_master where type = 'table' and name = 'tool_idempotency'"
+            ).fetchone()
+            if not tool_idempotency:
+                raise RuntimeError("tool_idempotency table is missing")
+            tool_audit_records = conn.execute(
+                "select name from sqlite_master where type = 'table' and name = 'tool_audit_records'"
+            ).fetchone()
+            if not tool_audit_records:
+                raise RuntimeError("tool_audit_records table is missing")
             conn.execute("begin immediate")
             conn.execute(
                 """
@@ -263,3 +408,38 @@ class SQLiteEventStore:
             conn.execute("create index if not exists idx_events_conversation on events(conversation_id)")
             conn.execute("create index if not exists idx_events_tenant_conversation on events(tenant_id, conversation_id)")
             conn.execute("create index if not exists idx_events_type on events(event_type)")
+            conn.execute(
+                """
+                create table if not exists tool_idempotency (
+                  scope_key text primary key,
+                  argument_hash text not null,
+                  status text not null,
+                  result_json text,
+                  created_at text not null,
+                  updated_at text not null
+                )
+                """
+            )
+            conn.execute("create index if not exists idx_tool_idempotency_status on tool_idempotency(status)")
+            conn.execute(
+                """
+                create table if not exists tool_audit_records (
+                  id text primary key,
+                  tenant_id text not null,
+                  actor_user_id text not null,
+                  request_id text not null,
+                  trace_id text not null,
+                  tool_name text not null,
+                  argument_hash text not null,
+                  status text not null,
+                  latency_ms integer not null,
+                  error_code text,
+                  idempotency_key_hash text,
+                  replayed integer not null default 0,
+                  created_at text not null
+                )
+                """
+            )
+            conn.execute("create index if not exists idx_tool_audit_tenant on tool_audit_records(tenant_id)")
+            conn.execute("create index if not exists idx_tool_audit_trace on tool_audit_records(trace_id)")
+            conn.execute("create index if not exists idx_tool_audit_tool on tool_audit_records(tool_name)")

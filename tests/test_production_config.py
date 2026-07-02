@@ -144,6 +144,9 @@ def test_production_container_uses_http_integrations_not_demo_store(monkeypatch,
         get_settings.cache_clear()
 
     assert container.store is None
+    assert container.event_store is not None
+    assert container.tools.idempotency_store is container.event_store
+    assert container.tools.audit_sink is container.event_store
     assert container.llm.provider.provider == "openai"
     assert {tool["name"] for tool in container.tools.registry.list_tools()} >= {
         "crm.get_customer",
