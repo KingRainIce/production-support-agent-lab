@@ -86,6 +86,28 @@ python scripts/run_eval.py
 agent.run.completed -> Kafka/SQS/Redis Stream -> monitor worker -> alert/dashboard
 ```
 
+本地 demo 里还提供了一个同步汇总入口：
+
+```bash
+curl http://127.0.0.1:8000/api/v1/admin/monitor/summary \
+  -H "X-Demo-Role: admin"
+```
+
+它会输出：
+
+- `by_risk_level`：风险等级分布。
+- `by_intent`：每类业务意图的线上量级。
+- `by_failure_type`：工具错误、越权、prompt injection、grounding 不足等失败类型。
+- `grounded_rate`、`policy_compliance_rate`、`human_review_rate`：可以直接放进 dashboard 的基础质量指标。
+- `alerts`：按 `agent_version + intent + failure_type` 聚合后的 P0-P3 告警。
+
+当前优先级规则很朴素，但适合学习生产思路：
+
+- `P0`：疑似 PII 泄露或 critical 风险。
+- `P1`：高风险 policy finding，或输出不满足 policy。
+- `P2`：工具失败、需要人工复核、citation/grounding 不足。
+- `P3`：其他需要观察的质量问题。
+
 ## 不要过度依赖 LLM-as-judge
 
 LLM judge 适合评估表达质量、同理心、覆盖度。关键事实不要只交给 judge：

@@ -9,6 +9,7 @@ from support_agent_lab.api.auth import DemoActor, get_demo_actor, require_admin,
 from support_agent_lab.bootstrap import AppContainer, create_container
 from support_agent_lab.memory.event_store import StoredEvent
 from support_agent_lab.models import AgentResponse, Message, MonitorEvent, new_id
+from support_agent_lab.monitoring.monitor import MonitorSummary
 
 
 class CreateSessionRequest(BaseModel):
@@ -117,6 +118,14 @@ def create_app() -> FastAPI:
     ) -> list[MonitorEvent]:
         require_admin(actor)
         return deps.monitor.events
+
+    @app.get("/api/v1/admin/monitor/summary")
+    def monitor_summary(
+        deps: Annotated[AppContainer, Depends(get_container)],
+        actor: Annotated[DemoActor, Depends(get_demo_actor)],
+    ) -> MonitorSummary:
+        require_admin(actor)
+        return deps.monitor.summarize()
 
     @app.post("/api/v1/admin/evals/golden")
     async def run_golden_eval(

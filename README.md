@@ -230,6 +230,20 @@ curl http://127.0.0.1:8000/api/v1/admin/tools \
   -H "X-Demo-Role: admin"
 ```
 
+查看 monitor agent 对线上表现的聚合：
+
+```bash
+curl http://127.0.0.1:8000/api/v1/admin/monitor/summary \
+  -H "X-Demo-Role: admin"
+```
+
+返回里重点看：
+
+- `by_risk_level`：低/中/高风险会话占比是否异常。
+- `by_intent`：哪个业务意图正在变差。
+- `by_failure_type`：是越权、工具失败、prompt injection，还是 citation 不足。
+- `alerts`：按 `agent_version + intent + failure_type` 聚合后的 P0-P3 告警。
+
 查看 append-only event log：
 
 ```bash
@@ -374,7 +388,7 @@ data/local/support-agent-lab.db
 
 读 `monitoring/monitor.py`。
 
-小练习：把 `TIMEOUT` 工具错误标成 P1 风险，并在 monitor event 里输出 failure type。
+小练习：先发一条 prompt injection，再用 `user_guest` 查 `A1001` 订单；随后调用 `/api/v1/admin/monitor/summary`，观察 `PROMPT_INJECTION_ATTEMPT` 和 `FORBIDDEN` 如何被聚合成不同优先级的 alert。再把 `TIMEOUT` 工具错误标成 P1 风险，并在 monitor summary 里输出对应 failure type。
 
 ### 第 9 步：理解 LLM Gateway
 
@@ -472,7 +486,7 @@ python -m support_agent_lab.mcp.server
 | 内存 `DemoStore` | CRM/OMS/Ticketing API |
 | 简单 `KnowledgeIndex` | pgvector + OpenSearch + reranker |
 | mock/deterministic response | LLM Gateway + fallback model |
-| 内存 monitor events | Queue consumer + warehouse + alert |
+| 内存 monitor events + summary alerts | Queue consumer + warehouse + alert manager/dashboard |
 | 简单 policy regex | PII detector + RBAC + compliance rules |
 | Mock LLM Gateway | Real model provider + fallback + cost budget |
 | SQLite event store | Postgres event table + Kafka/queue stream |
