@@ -86,11 +86,26 @@ X-Actor-Signature: sha256=<HMAC over tenant/user/roles/scopes/timestamp>
 
 `X-Demo-User` and `X-Demo-Role` are local-only teaching headers. In production they do not authenticate requests, and local fixture identities such as `user_demo` and `user_guest` are rejected. `X-Actor-Scopes` is required and should be the gateway's minimum capability set for this actor; missing or empty scopes fail closed.
 
-`X-Actor-Signature` is an HMAC-SHA256 signature produced by the gateway with `APP_ACTOR_SIGNATURE_SECRET`. The canonical signed fields are: signature version `v1`, tenant id, user id, canonical comma-separated roles, canonical comma-separated scopes, and Unix timestamp. `X-Actor-Signature` may be the bare hex digest or `sha256=<digest>`. The service rejects missing signatures, invalid signatures, and timestamps outside `APP_ACTOR_SIGNATURE_MAX_AGE_SECONDS` so that a downstream proxy or client cannot add `admin`, broaden scopes, or swap user ids after the gateway has authenticated the request.
+`X-Actor-Signature` is an HMAC-SHA256 signature produced by the gateway with `APP_ACTOR_SIGNATURE_SECRET`. The canonical signed fields are: signature version `v1`, tenant id, user id, canonical comma-separated roles, canonical comma-separated scopes, and Unix timestamp. Roles and scopes are trimmed and empty entries are removed, but their order is preserved and not sorted. `X-Actor-Signature` may be the bare hex digest or `sha256=<digest>`. The service rejects missing signatures, invalid signatures, and timestamps outside `APP_ACTOR_SIGNATURE_MAX_AGE_SECONDS` so that a downstream proxy or client cannot add `admin`, broaden scopes, or swap user ids after the gateway has authenticated the request.
 
 This is a deployable baseline for a trusted internal gateway. High-risk deployments should add gateway-side nonce or `jti` replay tracking for signed admin requests.
 
 This HMAC protects the Agent API ingress boundary. It is not a replacement for tenant/resource authorization inside the business service. `ToolBroker` enforces business tool scopes before every tool call, and your business API must still enforce tenant/resource ownership.
+
+Use the bundled signer to generate headers for production smoke tests:
+
+```bash
+export APP_TENANT_ID=your_real_tenant
+export APP_INTERNAL_API_KEY=your_internal_gateway_secret
+export APP_ACTOR_SIGNATURE_SECRET=your_actor_signature_secret_min_32_chars
+python scripts/sign_actor_headers.py \
+  --user-id user_prod \
+  --roles user \
+  --scopes "crm:read,order:read,shipping:read,ticket:write,kb:read" \
+  --format curl
+```
+
+The console-script form is `support-agent-sign-headers`. Both paths call `support_agent_lab.security.actor_signature`, which is also used by the FastAPI verifier.
 
 Admin role is not a wildcard. Production admin endpoints also require explicit management scopes:
 
@@ -204,6 +219,7 @@ Do not prove production mode by checking only that the container starts. Verify:
 - Removing `OPENAI_API_KEY`, `APP_BUSINESS_API_BASE_URL`, or `APP_KNOWLEDGE_API_BASE_URL` makes startup fail.
 - `GET /api/v1/ready?deep=true` reaches OpenAI, Business API `/health`, Knowledge API `/health`, and the SQLite event store.
 - Removing `APP_ACTOR_SIGNATURE_SECRET`, using a placeholder value, or setting a short secret makes startup fail.
+- `python scripts/sign_actor_headers.py --user-id user_prod --roles user --scopes "crm:read,order:read,shipping:read,ticket:write,kb:read" --format curl` emits signed headers when the gateway secrets are present in the environment.
 - Changing `X-Actor-User-Id`, `X-Actor-Roles`, or `X-Actor-Scopes` after signing makes the request fail with `401`.
 - A production `/api/v1/chat/messages` request creates matching `X-Trace-Id` / `X-Request-Id` entries in your business backend logs.
 - The returned `trace_id` can query `/api/v1/admin/tools/audit?trace_id=...` with `audit:read`, and the records contain hashes/status/latency but no raw arguments, PII, tokens, or full upstream payloads.

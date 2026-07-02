@@ -155,6 +155,8 @@ pip install -e ".[mcp]"
 python -m support_agent_lab.mcp.server
 ```
 
+Agent HTTP API ingress uses HMAC-signed `X-Actor-*` headers. MCP gateway mode is a separate protocol boundary: it should authenticate the MCP session or gateway token, then pass tenant/user/roles/scopes into `MCPToolAdapter`. Do not assume the bundled local MCP server validates `X-Actor-Signature`.
+
 生产中建议继续保留 `ToolBroker`，不要让 MCP server 绕过权限、审计和幂等；MCP runtime 只是协议入口，不是新的业务权限边界。
 
 ## 生产 MCP gateway 最小流程

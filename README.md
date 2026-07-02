@@ -98,6 +98,21 @@ X-Actor-Timestamp: <unix timestamp>
 X-Actor-Signature: sha256=<HMAC over tenant/user/roles/scopes/timestamp>
 ```
 
+Generate production smoke-test headers with the same signer used by the API tests:
+
+```powershell
+$env:APP_TENANT_ID="your_tenant"
+$env:APP_INTERNAL_API_KEY="your_internal_gateway_secret"
+$env:APP_ACTOR_SIGNATURE_SECRET="your_actor_signature_secret_min_32_chars"
+.\.venv\Scripts\python scripts\sign_actor_headers.py `
+  --user-id user_prod `
+  --roles user `
+  --scopes "crm:read,order:read,shipping:read,ticket:write,kb:read" `
+  --format curl
+```
+
+After `pip install -e ".[dev]"`, the same helper is available as `support-agent-sign-headers`. It shares `support_agent_lab.security.actor_signature` with the server-side verifier, so gateway smoke tests use the exact canonicalization for roles, scopes, tenant, user id, and timestamp.
+
 Admin endpoints 还需要管理面 scopes。示例：
 
 ```text
@@ -163,6 +178,9 @@ python scripts/demo_chat.py
 ```bash
 support-agent-demo
 support-agent-eval
+support-agent-monitor-eval
+support-agent-retrieval-eval
+support-agent-sign-headers
 ```
 
 可以试这些消息：
@@ -265,6 +283,8 @@ If omitted in local mode, the actor defaults to `user_demo`. If the request body
 
 Production mode does not accept these as authentication. Use `X-Internal-Auth`, `X-Actor-User-Id`, `X-Actor-Roles`, `X-Actor-Scopes`, `X-Actor-Timestamp`, and `X-Actor-Signature` from your trusted gateway.
 For admin APIs, also pass the matching management scope such as `monitor:read`, `monitor:write`, `events:read`, `memory:replay`, or `eval:run`.
+
+For production smoke tests, run `python scripts/sign_actor_headers.py --user-id user_prod --roles user --scopes "crm:read,order:read,shipping:read,ticket:write,kb:read" --format curl` and add the emitted `-H` lines to the same curl commands below.
 
 创建会话：
 

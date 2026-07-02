@@ -3,11 +3,12 @@ import time
 from fastapi.testclient import TestClient
 from fastapi import HTTPException
 
-from support_agent_lab.api.auth import get_request_actor, sign_actor_claims, _get_production_actor
+from support_agent_lab.api.auth import get_request_actor, _get_production_actor
 from support_agent_lab.api.main import app, get_container
 from support_agent_lab.bootstrap import create_container
 from support_agent_lab.config import get_settings
 from support_agent_lab.models import IntentType, MonitorEvent, RiskLevel
+from support_agent_lab.security.actor_signature import sign_actor_claims
 
 
 ACTOR_SIGNATURE_SECRET = "actor-signing-secret-with-32-byte-minimum"
@@ -214,6 +215,30 @@ def test_production_actor_rejects_tampered_user_and_roles():
         assert "signature is invalid" in exc.detail
     else:  # pragma: no cover
         raise AssertionError("tampered actor roles should invalidate the signature")
+
+
+def test_production_actor_rejects_signature_for_different_tenant():
+    signed_for_demo_tenant = _actor_signature_kwargs(
+        user_id="user_prod",
+        roles_header="user",
+        scopes_header="crm:read",
+    )
+    signed_for_demo_tenant["tenant_id"] = "tenant_other"
+
+    try:
+        _get_production_actor(
+            expected_key="secret",
+            provided_key="secret",
+            user_id="user_prod",
+            roles_header="user",
+            scopes_header="crm:read",
+            **signed_for_demo_tenant,
+        )
+    except HTTPException as exc:
+        assert exc.status_code == 401
+        assert "signature is invalid" in exc.detail
+    else:  # pragma: no cover
+        raise AssertionError("actor signatures should be bound to tenant")
 
 
 def test_production_actor_rejects_expired_signature():

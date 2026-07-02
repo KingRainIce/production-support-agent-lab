@@ -1,14 +1,14 @@
 from __future__ import annotations
 
-import hashlib
 import time
-from hmac import compare_digest, new as hmac_new
+from hmac import compare_digest
 from typing import Annotated
 
 from fastapi import Header, HTTPException, status
 from pydantic import BaseModel
 
 from support_agent_lab.config import get_settings
+from support_agent_lab.security.actor_signature import sign_actor_claims
 
 DEFAULT_USER_SCOPES = [
     "crm:read",
@@ -116,28 +116,6 @@ def _get_production_actor(
     return RequestActor(user_id=user_id, roles=roles, scopes=scopes)
 
 
-def sign_actor_claims(
-    *,
-    secret: str,
-    tenant_id: str,
-    user_id: str,
-    roles_header: str | None,
-    scopes_header: str | None,
-    timestamp: str,
-) -> str:
-    canonical = "\n".join(
-        [
-            "v1",
-            tenant_id,
-            user_id,
-            _canonical_csv(roles_header or "user"),
-            _canonical_csv(scopes_header or ""),
-            timestamp,
-        ]
-    )
-    return hmac_new(secret.encode("utf-8"), canonical.encode("utf-8"), hashlib.sha256).hexdigest()
-
-
 def _verify_actor_signature(
     *,
     secret: str | None,
@@ -185,10 +163,6 @@ def _verify_actor_signature(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Production actor signature is invalid.",
         )
-
-
-def _canonical_csv(value: str) -> str:
-    return ",".join(item.strip() for item in value.split(",") if item.strip())
 
 
 def require_same_user(request_user_id: str | None, actor: RequestActor) -> None:
