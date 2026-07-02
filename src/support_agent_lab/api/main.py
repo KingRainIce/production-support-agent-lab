@@ -83,12 +83,15 @@ def create_app() -> FastAPI:
         existing = deps.memory.states.get(body.conversation_id)
         if existing:
             require_same_user(existing.user_id, actor)
-        response = await deps.orchestrator.handle_message(
-            conversation_id=body.conversation_id,
-            user_id=actor.user_id,
-            text=body.content,
-            actor_scopes=actor.scopes,
-        )
+        try:
+            response = await deps.orchestrator.handle_message(
+                conversation_id=body.conversation_id,
+                user_id=actor.user_id,
+                text=body.content,
+                actor_scopes=actor.scopes,
+            )
+        except PermissionError as exc:
+            raise HTTPException(status_code=403, detail=str(exc)) from exc
         return ChatMessageResponse(
             message=response.message,
             trace_id=response.trace.id,
@@ -103,7 +106,12 @@ def create_app() -> FastAPI:
         actor: Annotated[RequestActor, Depends(get_request_actor)],
     ) -> list[Message]:
         if conversation_id not in deps.memory.states:
-            raise HTTPException(status_code=404, detail="Conversation not found")
+            try:
+                hydrate = deps.orchestrator.hydrate_memory_from_events(conversation_id, actor.user_id)
+            except PermissionError as exc:
+                raise HTTPException(status_code=403, detail=str(exc)) from exc
+            if hydrate["hydrate_status"] in {"no_event_store", "not_found"}:
+                raise HTTPException(status_code=404, detail="Conversation not found")
         state = deps.memory.states[conversation_id]
         require_same_user(state.user_id, actor)
         return state.messages
@@ -167,6 +175,7 @@ def create_app() -> FastAPI:
         if not deps.event_store:
             return []
         return deps.event_store.list_events(
+            tenant_id=deps.settings.app_tenant_id,
             conversation_id=conversation_id,
             event_type=event_type,
             limit=limit,
@@ -182,7 +191,11 @@ def create_app() -> FastAPI:
         require_admin(actor)
         if not deps.event_store:
             raise HTTPException(status_code=404, detail="Event store is not configured")
-        events = deps.event_store.list_events(conversation_id=conversation_id, limit=limit)
+        events = deps.event_store.list_events(
+            tenant_id=deps.settings.app_tenant_id,
+            conversation_id=conversation_id,
+            limit=limit,
+        )
         if not events:
             raise HTTPException(status_code=404, detail="Conversation events not found")
         try:

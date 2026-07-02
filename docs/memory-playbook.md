@@ -13,6 +13,7 @@
 3. `SQLiteEventStore.append_message` 追加 `message.user`。
 4. Agent 编排完成后追加 `message.assistant`、`agent.run.completed`、`monitor.reviewed`。
 5. 如果进程重启或需要复盘，可以用事件日志 replay 出 `ConversationState`。
+6. 在线编排会在处理新消息前运行 `memory.hydrate`：当内存里没有这个 conversation，但 event store 里有同租户事件时，先恢复短期状态，再进入 intent、routing 和工具调用。
 
 ## Replay API
 
@@ -33,6 +34,16 @@ curl http://127.0.0.1:8000/api/v1/admin/conversations/conv_abc123/memory/replay 
 - `replayed_message_count`：真正进入 memory 的 message 事件数。
 - `replayed_run_count`：用于恢复派生状态的 agent run 事件数。
 - `ignored_event_count`：没有参与 memory 重建的事件数量，例如 monitor event 和未知事件。
+
+## Live hydration
+
+`replay` 不只服务 admin 复盘。`SupportAgentOrchestrator.handle_message` 的第一个 span 是 `memory.hydrate`：
+
+- `already_loaded`：当前进程内存里已有 conversation，直接继续。
+- `not_found`：event store 也没有历史事件，按新会话处理。
+- `hydrated`：从 event store 按 `tenant_id + conversation_id` 找到事件，并恢复 `ConversationState`。
+
+恢复后会再次校验 `tenant_id` 和 `user_id`。如果用户试图复用别人的 `conversation_id`，编排会拒绝，API 返回 403。
 
 ## 为什么不直接信任内存对象
 
@@ -124,7 +135,7 @@ python scripts/run_eval.py examples/evals/memory_multiturn_regression.json
 
 - 短期 memory 存 Redis 或数据库快照，event log 存 Postgres/Kafka。
 - 重要状态字段要可重建，不要只保存在 prompt 文本里。
-- replay 任务应按 tenant 和 conversation 做权限隔离；当前 demo 仅开放 admin endpoint。
+- replay 和 live hydration 都应按 tenant、conversation、user 做权限隔离；当前实现按 `tenant_id + conversation_id` 查事件，并在恢复后校验 owner。
 - replay 失败要暴露具体原因：缺 message、跨 conversation、payload schema 变更。
 - replay 应校验 event 外层字段和 payload 字段一致，避免混入其他 tenant/user/conversation 的事件。
 - schema 变化时要写迁移或兼容 parser，让旧事件仍能复盘。

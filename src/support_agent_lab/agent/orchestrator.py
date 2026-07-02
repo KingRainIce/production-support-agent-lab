@@ -11,6 +11,7 @@ from support_agent_lab.agent.policy import PolicyEngine
 from support_agent_lab.agent.router import AgentRouter
 from support_agent_lab.llm.gateway import LLMGateway, LLMRequest, create_default_llm_gateway
 from support_agent_lab.memory.event_store import SQLiteEventStore
+from support_agent_lab.memory.replay import replay_conversation_memory
 from support_agent_lab.memory.store import ConversationMemory
 from support_agent_lab.models import (
     AgentResponse,
@@ -58,6 +59,14 @@ class SupportAgentOrchestrator:
     ) -> AgentResponse:
         trace = AgentRunTrace(tenant_id=self.tenant_id, conversation_id=conversation_id, user_id=user_id)
         self.runs[trace.id] = trace
+        hydrate_span = trace.start_span("memory.hydrate")
+        try:
+            hydrate_span.close(**self.hydrate_memory_from_events(conversation_id, user_id))
+        except Exception as exc:
+            hydrate_span.close(status="error", error=type(exc).__name__, message=str(exc))
+            trace.finish("failed")
+            raise
+
         user_msg = Message(
             tenant_id=self.tenant_id,
             conversation_id=conversation_id,
@@ -311,6 +320,34 @@ class SupportAgentOrchestrator:
             if self.event_store:
                 self.event_store.append_monitor_event(monitor_event, tenant_id=self.tenant_id)
         return response
+
+    def hydrate_memory_from_events(self, conversation_id: str, user_id: str, limit: int = 1000) -> dict[str, Any]:
+        if conversation_id in self.memory.states:
+            state = self.memory.states[conversation_id]
+            if state.tenant_id != self.tenant_id or state.user_id != user_id:
+                raise PermissionError("Conversation belongs to a different tenant or user")
+            return {"hydrate_status": "already_loaded", "event_count": 0, "replayed_message_count": 0}
+        if not self.event_store:
+            return {"hydrate_status": "no_event_store", "event_count": 0, "replayed_message_count": 0}
+
+        events = self.event_store.list_events(
+            tenant_id=self.tenant_id,
+            conversation_id=conversation_id,
+            limit=limit,
+        )
+        if not events:
+            return {"hydrate_status": "not_found", "event_count": 0, "replayed_message_count": 0}
+
+        replay = replay_conversation_memory(events)
+        if replay.state.tenant_id != self.tenant_id or replay.state.user_id != user_id:
+            raise PermissionError("Conversation belongs to a different tenant or user")
+        self.memory.states[conversation_id] = replay.state
+        return {
+            "hydrate_status": "hydrated",
+            "event_count": replay.event_count,
+            "replayed_message_count": replay.replayed_message_count,
+            "replayed_run_count": replay.replayed_run_count,
+        }
 
     def _max_risk(self, findings) -> RiskLevel:
         order = {RiskLevel.low: 0, RiskLevel.medium: 1, RiskLevel.high: 2, RiskLevel.critical: 3}

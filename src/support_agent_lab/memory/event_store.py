@@ -105,6 +105,7 @@ class SQLiteEventStore:
     def list_events(
         self,
         *,
+        tenant_id: str | None = None,
         conversation_id: str | None = None,
         event_type: str | None = None,
         limit: int = 100,
@@ -112,6 +113,9 @@ class SQLiteEventStore:
         sql = "select id, tenant_id, conversation_id, user_id, event_type, payload_json, created_at from events"
         clauses: list[str] = []
         params: list[Any] = []
+        if tenant_id:
+            clauses.append("tenant_id = ?")
+            params.append(tenant_id)
         if conversation_id:
             clauses.append("conversation_id = ?")
             params.append(conversation_id)
@@ -203,4 +207,5 @@ class SQLiteEventStore:
                 """
             )
             conn.execute("create index if not exists idx_events_conversation on events(conversation_id)")
+            conn.execute("create index if not exists idx_events_tenant_conversation on events(tenant_id, conversation_id)")
             conn.execute("create index if not exists idx_events_type on events(event_type)")

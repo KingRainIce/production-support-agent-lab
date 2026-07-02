@@ -191,7 +191,7 @@ http://127.0.0.1:8000/api/v1/ready
 | Citation | 支撑回答的来源片段 | `RetrievalHit` | 避免客服幻觉政策 |
 | Trace/span | 一次 Agent run 的分步轨迹 | `AgentRunTrace` | 出问题时能定位是哪一步坏了 |
 | LLM Gateway | 模型调用抽象层，生产用 OpenAI provider，本地测试用 deterministic provider | `llm/gateway.py` | 统一模型路由、fallback、成本和延迟记录 |
-| Event store | append-only 事件日志，默认 SQLite | `memory/event_store.py` | 多轮记忆、审计、回放不能只靠内存对象 |
+| Event store | append-only 事件日志，默认 SQLite | `memory/event_store.py` | 多轮记忆、审计、回放和重启恢复不能只靠内存对象 |
 | Idempotency | 同一个写请求重试不会重复产生副作用 | `ToolBroker` | 防止重复建单、重复退款 |
 | Golden eval | 高频核心路径的回归测试 | `examples/evals/golden_core.json` | 让改 prompt/代码有安全网 |
 | Monitor agent | 本地同进程检查对话质量，生产可改成异步 worker | `monitoring/monitor.py` | 发现线上漂移和高风险会话 |
@@ -206,17 +206,18 @@ http://127.0.0.1:8000/api/v1/ready
 
 系统会发生这些事：
 
-1. `ConversationMemory.add_message` 保存用户消息，并抽取 `last_order_id=A1001`。
-2. `IntentDetector.detect` 识别为 `refund_or_return`。
-3. `PolicyEngine.check_input` 检查 prompt injection、PII 等风险。
-4. `AgentRouter.route` 把请求路由到 `order_agent`。
-5. `OrderAgent.plan` 产出工具计划：查客户、查订单、创建售后工单。
-6. local mode 用 `KnowledgeIndex.search` 检索 `return_policy_v3`；production mode 用 `HTTPKnowledgeIndex` 调真实知识库。
-7. `ToolBroker.call` 执行 `crm.get_customer`、`order.get`、`ticket.create`。
-8. `LLMGateway.generate` 在 production 调 OpenAI Responses API；local mode 记录 deterministic trace。
-9. `PolicyEngine.check_output` 检查是否有违规承诺。
-10. `OnlineMonitorAgent.review` 生成 monitor event。
-11. `SQLiteEventStore` 落盘 user message、assistant message、agent run 和 monitor event。
+1. `memory.hydrate` 先检查内存里是否已有 conversation；如果进程重启过，会从 `SQLiteEventStore` 按 tenant + conversation replay 出 `ConversationState`。
+2. `ConversationMemory.add_message` 保存用户消息，并抽取 `last_order_id=A1001`。
+3. `IntentDetector.detect` 识别为 `refund_or_return`。
+4. `PolicyEngine.check_input` 检查 prompt injection、PII 等风险。
+5. `AgentRouter.route` 把请求路由到 `order_agent`。
+6. `OrderAgent.plan` 产出工具计划：查客户、查订单、创建售后工单。
+7. local mode 用 `KnowledgeIndex.search` 检索 `return_policy_v3`；production mode 用 `HTTPKnowledgeIndex` 调真实知识库。
+8. `ToolBroker.call` 执行 `crm.get_customer`、`order.get`、`ticket.create`。
+9. `LLMGateway.generate` 在 production 调 OpenAI Responses API；local mode 记录 deterministic trace。
+10. `PolicyEngine.check_output` 检查是否有违规承诺。
+11. `OnlineMonitorAgent.review` 生成 monitor event。
+12. `SQLiteEventStore` 落盘 user message、assistant message、agent run 和 monitor event。
 
 成功回答类似：
 

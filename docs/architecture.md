@@ -56,12 +56,13 @@ Production systems usually keep both:
 - Thread state lives in Redis/Postgres with fast reads and TTL.
 - Event logs live in Postgres/Kafka/warehouse with append-only semantics.
 
-`memory/replay.py` connects the two: it rebuilds a fresh `ConversationState` from stored events without mutating the live in-process memory. The admin replay endpoint is useful for incident review and for checking whether a new memory extraction rule changes historical conversations.
+`memory/replay.py` connects the two: it rebuilds a fresh `ConversationState` from stored events. The admin replay endpoint uses that result for incident review without mutating live memory, while the orchestrator uses the same replay path to hydrate a missing conversation before the next turn after a process restart.
 
 ## 主流程
 
 ```text
 HTTP message
+  -> memory.hydrate from event log when in-process state is missing
   -> ConversationMemory.add_message
   -> IntentDetector.detect
   -> PolicyEngine.check_input

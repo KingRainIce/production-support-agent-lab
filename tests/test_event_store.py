@@ -122,3 +122,92 @@ def test_event_store_health_check_verifies_write_without_persisting_probe(tmp_pa
     event_store.health_check()
 
     assert event_store.list_events(event_type="readiness.probe") == []
+
+
+@pytest.mark.asyncio
+async def test_orchestrator_hydrates_memory_from_event_log_after_restart(tmp_path):
+    event_store = SQLiteEventStore(tmp_path / "events.db")
+    store = DemoStore.seeded()
+    first_orchestrator = _build_orchestrator(event_store, store=store)
+    await first_orchestrator.handle_message("conv_hydrate", "user_demo", "Where is order A1002 shipping?")
+
+    restarted_orchestrator = _build_orchestrator(event_store, store=store)
+    response = await restarted_orchestrator.handle_message(
+        "conv_hydrate",
+        "user_demo",
+        "I also need an invoice copy.",
+    )
+
+    state = restarted_orchestrator.memory.states["conv_hydrate"]
+    hydrate_span = response.trace.spans[0]
+    assert hydrate_span.name == "memory.hydrate"
+    assert hydrate_span.status == "ok"
+    assert hydrate_span.metadata["hydrate_status"] == "hydrated"
+    assert hydrate_span.metadata["replayed_message_count"] == 2
+    assert state.facts["last_order_id"] == "A1002"
+    assert any(
+        tool.name == "order.get" and tool.data and tool.data["order_id"] == "A1002"
+        for tool in response.trace.tool_results
+    )
+
+
+@pytest.mark.asyncio
+async def test_orchestrator_rejects_hydrated_conversation_for_wrong_user(tmp_path):
+    event_store = SQLiteEventStore(tmp_path / "events.db")
+    first_orchestrator = _build_orchestrator(event_store)
+    await first_orchestrator.handle_message("conv_owned", "user_demo", "Where is order A1002 shipping?")
+
+    restarted_orchestrator = _build_orchestrator(event_store)
+
+    with pytest.raises(PermissionError, match="different tenant or user"):
+        await restarted_orchestrator.handle_message("conv_owned", "user_guest", "Continue that conversation")
+
+    failed_trace = next(iter(restarted_orchestrator.runs.values()))
+    assert failed_trace.status == "failed"
+    assert failed_trace.spans[0].name == "memory.hydrate"
+    assert failed_trace.spans[0].status == "error"
+
+
+def test_event_store_list_events_filters_by_tenant(tmp_path):
+    event_store = SQLiteEventStore(tmp_path / "events.db")
+    event_store.append(
+        tenant_id="tenant_a",
+        conversation_id="same_conv",
+        event_type="custom",
+        payload={"tenant": "a"},
+    )
+    event_store.append(
+        tenant_id="tenant_b",
+        conversation_id="same_conv",
+        event_type="custom",
+        payload={"tenant": "b"},
+    )
+
+    tenant_events = event_store.list_events(tenant_id="tenant_a", conversation_id="same_conv")
+
+    assert len(tenant_events) == 1
+    assert tenant_events[0].tenant_id == "tenant_a"
+    assert tenant_events[0].payload == {"tenant": "a"}
+
+
+def _build_orchestrator(
+    event_store: SQLiteEventStore,
+    *,
+    store: DemoStore | None = None,
+    memory: ConversationMemory | None = None,
+) -> SupportAgentOrchestrator:
+    store = store or DemoStore.seeded()
+    knowledge = KnowledgeIndex()
+    tools = ToolBroker(
+        registry=create_registry(store, knowledge),
+        idempotency_store=store.idempotency,
+    )
+    return SupportAgentOrchestrator(
+        tenant_id="demo_tenant",
+        memory=memory or ConversationMemory(),
+        knowledge=knowledge,
+        tools=tools,
+        llm=create_default_llm_gateway(),
+        event_store=event_store,
+        monitor=OnlineMonitorAgent(),
+    )
