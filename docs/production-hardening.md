@@ -9,7 +9,7 @@
 | ConversationMemory | 进程内状态 + SQLite event replay | PostgreSQL + Redis |
 | Business tools | HTTPBusinessClient 调真实 CRM/OMS/Shipping/Ticketing API | 服务网格、熔断、重试预算、审计中心 |
 | Knowledge | HTTPKnowledgeIndex 调真实 knowledge service | pgvector + BM25 + reranker |
-| OnlineMonitorAgent | 同进程 list | Queue worker + OLAP/dashboard |
+| OnlineMonitorAgent | 同进程 summary + SQLite event-store summary | Queue worker + OLAP/dashboard |
 | LLMGateway | OpenAI Responses API | Provider routing + fallback + budget |
 | SQLiteEventStore | local SQLite events | Postgres append-only events + Kafka stream |
 | Tool audit | 内存 audit_log | append-only audit table |

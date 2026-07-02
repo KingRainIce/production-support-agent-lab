@@ -136,7 +136,7 @@ python scripts/run_monitor_eval.py
 
 ## 在线 monitor agent
 
-`OnlineMonitorAgent` 在本地 lab 中同进程消费 `AgentResponse`，生成 `MonitorEvent`。生产环境应改成异步队列消费者。
+`OnlineMonitorAgent` 在本地 lab 中同进程消费 `AgentResponse`，生成 `MonitorEvent`。事件会同步写入 `SQLiteEventStore` 的 `monitor.reviewed`，因此即使进程重启，也可以从 append-only event log 重建 monitor summary。生产环境应改成异步队列消费者。
 
 它检查：
 
@@ -159,6 +159,19 @@ curl http://127.0.0.1:8000/api/v1/admin/monitor/summary \
   -H "X-Demo-Role: admin"
 ```
 
+这个入口有两种来源：
+
+- `source=live`：读取当前进程的 `OnlineMonitorAgent.events`，用于开发时快速看刚刚触发的风险。
+- `source=event_store`：读取持久化的 `monitor.reviewed` 事件，适合线上排障、重启恢复后审计、按 `conversation_id` 复盘单个会话。
+
+```bash
+curl "http://127.0.0.1:8000/api/v1/admin/monitor/summary?source=event_store&conversation_id=conv_abc123" \
+  -H "X-Demo-Role: admin"
+
+curl "http://127.0.0.1:8000/api/v1/admin/monitor/events?source=event_store&conversation_id=conv_abc123" \
+  -H "X-Demo-Role: admin"
+```
+
 它会输出：
 
 - `by_risk_level`：风险等级分布。
@@ -173,6 +186,38 @@ curl http://127.0.0.1:8000/api/v1/admin/monitor/summary \
 - `P1`：高风险 policy finding，或输出不满足 policy。
 - `P2`：工具失败、需要人工复核、citation/grounding 不足。
 - `P3`：其他需要观察的质量问题。
+
+## Monitor 事件契约
+
+`MonitorEvent` 是线上质量闭环的最小事实单元，不依赖自然语言大段日志：
+
+- `conversation_id` / `run_id`：定位会话和单次 agent run。
+- `agent_version`：发布回滚和 canary 对比的分组键。
+- `user_intent`：判断风险集中在哪类业务。
+- `risk_level`：`low`、`medium`、`high`、`critical`。
+- `grounded`：回答是否有 citation 或属于必须人工处理的安全/投诉路径。
+- `policy_compliant` / `pii_leak`：判断合规风险和 P0 事件。
+- `needs_human_review`：衡量人工复核压力。
+- `failure_types`：例如 `PROMPT_INJECTION_ATTEMPT`、`FORBIDDEN`、`TIMEOUT`。
+
+生产中建议把这些字段原样进入数据仓库或指标系统，不要只保存最终回答文本。最终回答适合做抽样质检，结构化事件才适合做实时告警、聚合和回归测试。
+
+## 告警与处置 Runbook
+
+| 信号 | 建议阈值 | 处置 |
+| --- | --- | --- |
+| P0 alert | 任意 1 条 | 暂停相关 agent version 的自动处理，导出 run trace，检查 output policy 和脱敏链路 |
+| P1 alert | 5 分钟内同 key >= 3 条，或 canary 高于基线 2 倍 | 回滚 prompt/model/router 变更，加入 security 或 monitor regression |
+| P2 tool failure | 5 分钟内同工具错误率 >= 5% | 看 `trace.tool_results.error_code`，区分 timeout、schema、权限、上游 5xx |
+| `grounded_rate` 下降 | 低于最近 7 天 p50 的 90% | 跑 `scripts/run_retrieval_eval.py`，检查 query rewrite、tokenizer、rerank 和知识库版本 |
+| `human_review_rate` 上升 | 高于基线 2 倍 | 判断是投诉真实增长、policy 误杀，还是工具失败导致保守转人工 |
+
+线上事件进入 eval 的流程应该固定：
+
+1. 从 `/api/v1/admin/monitor/events?source=event_store` 导出失败样本。
+2. 找到对应 `/api/v1/agent/runs/{run_id}`，确认 intent、route、tools、retrieval、policy 哪一步退化。
+3. 把样本加入最贴近的回归集：`routing_regression.json`、`tool_failure_regression.json`、`retrieval_challenge.json`、`security_regression.json` 或 `monitor_regression.json`。
+4. 修代码或配置后先跑相关 eval，再跑全量 `pytest` 和 `scripts/run_eval.py`。
 
 ## 不要过度依赖 LLM-as-judge
 

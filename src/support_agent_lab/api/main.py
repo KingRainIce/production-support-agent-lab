@@ -12,7 +12,7 @@ from support_agent_lab.api.readiness import ReadinessResponse, check_readiness
 from support_agent_lab.memory.event_store import StoredEvent
 from support_agent_lab.memory.replay import MemoryReplayResult, replay_conversation_memory
 from support_agent_lab.models import AgentResponse, Message, MonitorEvent, new_id
-from support_agent_lab.monitoring.monitor import MonitorSummary
+from support_agent_lab.monitoring.monitor import MonitorSummary, summarize_monitor_events
 
 
 class CreateSessionRequest(BaseModel):
@@ -140,17 +140,46 @@ def create_app() -> FastAPI:
     def monitor_events(
         deps: Annotated[AppContainer, Depends(get_container)],
         actor: Annotated[RequestActor, Depends(get_request_actor)],
+        source: Annotated[str, Query(pattern="^(live|event_store)$")] = "live",
+        conversation_id: Annotated[str | None, Query()] = None,
+        limit: Annotated[int, Query(ge=1, le=500)] = 100,
     ) -> list[MonitorEvent]:
         require_admin(actor)
-        return deps.monitor.events
+        if source == "event_store":
+            if not deps.event_store:
+                raise HTTPException(status_code=404, detail="Event store is not configured")
+            return deps.event_store.list_monitor_events(
+                tenant_id=deps.settings.app_tenant_id,
+                conversation_id=conversation_id,
+                limit=limit,
+            )
+        if conversation_id:
+            return [event for event in deps.monitor.events if event.conversation_id == conversation_id][:limit]
+        return deps.monitor.events[:limit]
 
     @app.get("/api/v1/admin/monitor/summary")
     def monitor_summary(
         deps: Annotated[AppContainer, Depends(get_container)],
         actor: Annotated[RequestActor, Depends(get_request_actor)],
+        source: Annotated[str, Query(pattern="^(live|event_store)$")] = "live",
+        conversation_id: Annotated[str | None, Query()] = None,
+        limit: Annotated[int, Query(ge=1, le=500)] = 500,
     ) -> MonitorSummary:
         require_admin(actor)
-        return deps.monitor.summarize()
+        if source == "event_store":
+            if not deps.event_store:
+                raise HTTPException(status_code=404, detail="Event store is not configured")
+            events = deps.event_store.list_monitor_events(
+                tenant_id=deps.settings.app_tenant_id,
+                conversation_id=conversation_id,
+                limit=limit,
+            )
+            return summarize_monitor_events(events)
+        if conversation_id:
+            return summarize_monitor_events(
+                [event for event in deps.monitor.events if event.conversation_id == conversation_id][:limit]
+            )
+        return summarize_monitor_events(deps.monitor.events[:limit])
 
     @app.post("/api/v1/admin/evals/golden")
     async def run_golden_eval(

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections import Counter, defaultdict
+from collections.abc import Sequence
 from typing import Literal
 
 from pydantic import BaseModel, Field
@@ -63,77 +64,84 @@ class OnlineMonitorAgent:
         return event
 
     def summarize(self) -> MonitorSummary:
-        total = len(self.events)
-        if total == 0:
-            return MonitorSummary(
-                total_events=0,
-                by_risk_level={},
-                by_intent={},
-                by_failure_type={},
-                grounded_rate=1.0,
-                policy_compliance_rate=1.0,
-                human_review_rate=0.0,
-                alerts=[],
-            )
-
-        risk_counts = Counter(event.risk_level.value for event in self.events)
-        intent_counts = Counter(event.user_intent.value for event in self.events)
-        failure_counts = Counter(
-            failure for event in self.events for failure in event.failure_types
-        )
-        alerts_by_key: dict[str, list[MonitorEvent]] = defaultdict(list)
-        for event in self.events:
-            if not event.failure_types and event.grounded and event.policy_compliant and not event.needs_human_review:
-                continue
-            failure_key = "+".join(sorted(event.failure_types)) or "QUALITY_REVIEW"
-            key = f"{event.agent_version}:{event.user_intent.value}:{failure_key}"
-            alerts_by_key[key].append(event)
-
-        alerts = [
-            self._build_alert(key, grouped)
-            for key, grouped in alerts_by_key.items()
-        ]
-        alerts.sort(key=lambda alert: (self._severity_rank(alert.severity), -alert.count, alert.key))
-        return MonitorSummary(
-            total_events=total,
-            by_risk_level=dict(risk_counts),
-            by_intent=dict(intent_counts),
-            by_failure_type=dict(failure_counts),
-            grounded_rate=round(sum(1 for event in self.events if event.grounded) / total, 4),
-            policy_compliance_rate=round(sum(1 for event in self.events if event.policy_compliant) / total, 4),
-            human_review_rate=round(sum(1 for event in self.events if event.needs_human_review) / total, 4),
-            alerts=alerts,
-        )
+        return summarize_monitor_events(self.events)
 
     def _summarize(self, response: AgentResponse) -> str:
         intent = response.trace.intent.primary.value if response.trace.intent else "unknown"
         tools = ", ".join(tool.name for tool in response.trace.tool_results) or "no tools"
         return f"intent={intent}; tools={tools}; handoff={response.handoff_required}"
 
-    def _build_alert(self, key: str, events: list[MonitorEvent]) -> MonitorAlert:
-        severity = self._severity_for(events)
-        failures = Counter(failure for event in events for failure in event.failure_types)
-        top_failure = failures.most_common(1)[0][0] if failures else "QUALITY_REVIEW"
-        reason = f"{top_failure} clustered across {len(events)} event(s)"
-        return MonitorAlert(
-            severity=severity,
-            key=key,
-            count=len(events),
-            reason=reason,
-            sample_run_ids=[event.run_id for event in events[:3]],
+
+def summarize_monitor_events(events: Sequence[MonitorEvent]) -> MonitorSummary:
+    total = len(events)
+    if total == 0:
+        return MonitorSummary(
+            total_events=0,
+            by_risk_level={},
+            by_intent={},
+            by_failure_type={},
+            grounded_rate=1.0,
+            policy_compliance_rate=1.0,
+            human_review_rate=0.0,
+            alerts=[],
         )
 
-    def _severity_for(self, events: list[MonitorEvent]) -> Literal["P0", "P1", "P2", "P3"]:
-        if any(event.pii_leak or event.risk_level == RiskLevel.critical for event in events):
-            return "P0"
-        if any(
-            event.risk_level == RiskLevel.high or not event.policy_compliant
-            for event in events
-        ):
-            return "P1"
-        if any(event.needs_human_review or not event.grounded for event in events):
-            return "P2"
-        return "P3"
+    risk_counts = Counter(event.risk_level.value for event in events)
+    intent_counts = Counter(event.user_intent.value for event in events)
+    failure_counts = Counter(
+        failure for event in events for failure in event.failure_types
+    )
+    alerts_by_key: dict[str, list[MonitorEvent]] = defaultdict(list)
+    for event in events:
+        if not event.failure_types and event.grounded and event.policy_compliant and not event.needs_human_review:
+            continue
+        failure_key = "+".join(sorted(event.failure_types)) or "QUALITY_REVIEW"
+        key = f"{event.agent_version}:{event.user_intent.value}:{failure_key}"
+        alerts_by_key[key].append(event)
 
-    def _severity_rank(self, severity: str) -> int:
-        return {"P0": 0, "P1": 1, "P2": 2, "P3": 3}.get(severity, 9)
+    alerts = [
+        _build_alert(key, grouped)
+        for key, grouped in alerts_by_key.items()
+    ]
+    alerts.sort(key=lambda alert: (_severity_rank(alert.severity), -alert.count, alert.key))
+    return MonitorSummary(
+        total_events=total,
+        by_risk_level=dict(risk_counts),
+        by_intent=dict(intent_counts),
+        by_failure_type=dict(failure_counts),
+        grounded_rate=round(sum(1 for event in events if event.grounded) / total, 4),
+        policy_compliance_rate=round(sum(1 for event in events if event.policy_compliant) / total, 4),
+        human_review_rate=round(sum(1 for event in events if event.needs_human_review) / total, 4),
+        alerts=alerts,
+    )
+
+
+def _build_alert(key: str, events: list[MonitorEvent]) -> MonitorAlert:
+    severity = _severity_for(events)
+    failures = Counter(failure for event in events for failure in event.failure_types)
+    top_failure = failures.most_common(1)[0][0] if failures else "QUALITY_REVIEW"
+    reason = f"{top_failure} clustered across {len(events)} event(s)"
+    return MonitorAlert(
+        severity=severity,
+        key=key,
+        count=len(events),
+        reason=reason,
+        sample_run_ids=[event.run_id for event in events[:3]],
+    )
+
+
+def _severity_for(events: list[MonitorEvent]) -> Literal["P0", "P1", "P2", "P3"]:
+    if any(event.pii_leak or event.risk_level == RiskLevel.critical for event in events):
+        return "P0"
+    if any(
+        event.risk_level == RiskLevel.high or not event.policy_compliant
+        for event in events
+    ):
+        return "P1"
+    if any(event.needs_human_review or not event.grounded for event in events):
+        return "P2"
+    return "P3"
+
+
+def _severity_rank(severity: str) -> int:
+    return {"P0": 0, "P1": 1, "P2": 2, "P3": 3}.get(severity, 9)

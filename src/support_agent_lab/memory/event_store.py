@@ -141,6 +141,21 @@ class SQLiteEventStore:
             for row in rows
         ]
 
+    def list_monitor_events(
+        self,
+        *,
+        tenant_id: str | None = None,
+        conversation_id: str | None = None,
+        limit: int = 500,
+    ) -> list[MonitorEvent]:
+        events = self.list_events(
+            tenant_id=tenant_id,
+            conversation_id=conversation_id,
+            event_type="monitor.reviewed",
+            limit=limit,
+        )
+        return [MonitorEvent.model_validate(event.payload) for event in events]
+
     def health_check(self) -> None:
         with self._connect() as conn:
             quick_check = conn.execute("pragma quick_check").fetchone()

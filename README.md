@@ -311,6 +311,20 @@ curl http://127.0.0.1:8000/api/v1/admin/monitor/summary \
   -H "X-Demo-Role: admin"
 ```
 
+默认 `source=live` 读取当前进程里的 monitor events，适合本地调试。生产排障或进程重启后应读取 append-only event log：
+
+```bash
+curl "http://127.0.0.1:8000/api/v1/admin/monitor/summary?source=event_store&conversation_id=conv_abc123" \
+  -H "X-Demo-Role: admin"
+```
+
+查看原始 monitor events：
+
+```bash
+curl "http://127.0.0.1:8000/api/v1/admin/monitor/events?source=event_store&conversation_id=conv_abc123" \
+  -H "X-Demo-Role: admin"
+```
+
 返回里重点看：
 
 - `by_risk_level`：低/中/高风险会话占比是否异常。
@@ -507,7 +521,7 @@ python scripts/run_retrieval_eval.py
 python scripts/run_monitor_eval.py
 ```
 
-小练习：先发一条 prompt injection，再用 `user_guest` 查 `A1001` 订单；随后调用 `/api/v1/admin/monitor/summary`，观察 `PROMPT_INJECTION_ATTEMPT` 如何聚合成 P1，`FORBIDDEN` 和 `TIMEOUT` 如何聚合成 P2。再尝试新增一个 truly critical 的 failure type，把它升级为 P0/P1，并同步更新 `monitor_regression.json`。
+小练习：先发一条 prompt injection，再用 `user_guest` 查 `A1001` 订单；随后分别调用 `/api/v1/admin/monitor/summary` 和 `/api/v1/admin/monitor/summary?source=event_store&conversation_id=...`，观察 `PROMPT_INJECTION_ATTEMPT` 如何聚合成 P1，`FORBIDDEN` 和 `TIMEOUT` 如何聚合成 P2。再尝试新增一个 truly critical 的 failure type，把它升级为 P0/P1，并同步更新 `monitor_regression.json`。
 
 ### 第 9 步：理解 LLM Gateway
 
@@ -646,7 +660,7 @@ python -m support_agent_lab.mcp.server
 | 答案无引用 | `response.citations` | 强制 citation gate，不足时回答不确定或转人工 |
 | 重复建单 | `ToolBroker.idempotency_store` | 写工具必须带 idempotency key |
 | 越权/隐私风险 | `policy_findings` 和 monitor event | scope、tenant check、字段脱敏、人工升级 |
-| 线上质量漂移 | `monitor.events` | 按 agent version、intent、failure type 聚合 |
+| 线上质量漂移 | `/api/v1/admin/monitor/summary?source=event_store` | 按 agent version、intent、failure type 聚合，并把真实失败样本沉淀回 monitor eval |
 
 ## Production mode vs scale-up roadmap
 
@@ -656,7 +670,7 @@ python -m support_agent_lab.mcp.server
 | 业务系统 | `HTTPBusinessClient` 调 CRM/OMS/Shipping/Ticketing API | 服务网格、熔断、重试预算、审计中心 |
 | 知识库 | `HTTPKnowledgeIndex` 调真实 knowledge service | pgvector/OpenSearch/reranker + answerability gate |
 | LLM | OpenAI Responses API provider | 多模型路由、fallback、成本预算 |
-| Monitor | 同进程 summary + monitor regression gate | Queue consumer + warehouse + alert manager/dashboard |
+| Monitor | 同进程 summary + SQLite event-store summary + monitor regression gate | Queue consumer + warehouse + alert manager/dashboard |
 | Policy | 规则引擎 + routing override | PII detector + RBAC + compliance workflow |
 | Event store | SQLite append-only event log | Postgres/Kafka event stream |
 | Tool audit | ToolBroker audit records | append-only audit table + SIEM |
