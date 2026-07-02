@@ -3,7 +3,7 @@
 客服 Agent 的记忆不要只理解成“把历史消息塞回 prompt”。生产里至少要分三层：
 
 - `ConversationMemory`：当前线程可继续推理的短期状态，比如 messages、last order id、working summary。
-- `SQLiteEventStore`：append-only 事件日志，用于审计、回放、离线 eval 和事故复盘。
+- `SQLiteEventStore`：append-only message/run/monitor 事件日志，用于审计、回放、离线 eval 和事故复盘；同一 SQLite adapter 还持久化工具幂等和 tool audit 记录，但 memory replay 不消费这些表。
 - `memory.replay`：从事件日志重建短期状态，验证内存状态不是不可解释的黑盒。
 
 ## 一次消息如何进入记忆

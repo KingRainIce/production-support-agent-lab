@@ -348,7 +348,11 @@ class ToolBroker:
         )
         self.audit_log.append(record)
         if self.audit_sink:
-            self.audit_sink.append_tool_audit(record)
+            try:
+                self.audit_sink.append_tool_audit(record)
+            except Exception:
+                # Keep the tool result truthful; readiness should catch durable audit sink failures.
+                pass
 
     def _hash(self, arguments: dict[str, Any]) -> str:
         payload = json.dumps(arguments, ensure_ascii=False, sort_keys=True)

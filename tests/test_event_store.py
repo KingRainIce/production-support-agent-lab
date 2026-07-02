@@ -1,4 +1,8 @@
+import asyncio
+from datetime import timedelta
+
 import pytest
+from pydantic import BaseModel
 
 from support_agent_lab.agent.orchestrator import SupportAgentOrchestrator
 from support_agent_lab.data.fixtures import DemoStore
@@ -6,10 +10,11 @@ from support_agent_lab.llm.gateway import create_default_llm_gateway
 from support_agent_lab.memory.event_store import SQLiteEventStore, StoredEvent
 from support_agent_lab.memory.replay import replay_conversation_memory
 from support_agent_lab.memory.store import ConversationMemory, KnowledgeIndex
-from support_agent_lab.models import MonitorAlertStatus, MonitorAlertTriageEvent
+from support_agent_lab.models import MonitorAlertStatus, MonitorAlertTriageEvent, utc_now
 from support_agent_lab.monitoring.monitor import OnlineMonitorAgent, summarize_monitor_events
 from support_agent_lab.tools.business_tools import create_registry
-from support_agent_lab.tools.registry import Actor, ToolBroker, ToolContext
+from support_agent_lab.tools.errors import UPSTREAM_UNAVAILABLE, ToolError
+from support_agent_lab.tools.registry import Actor, ToolBroker, ToolContext, ToolDefinition, ToolRegistry
 
 
 @pytest.mark.asyncio
@@ -359,6 +364,229 @@ async def test_tool_idempotency_hash_uses_canonical_parsed_payload(tmp_path):
     assert replay.data == first.data
 
 
+@pytest.mark.asyncio
+async def test_sqlite_tool_idempotency_blocks_concurrent_same_key_write(tmp_path):
+    event_store = SQLiteEventStore(tmp_path / "events.db")
+    handler_started = asyncio.Event()
+    allow_finish = asyncio.Event()
+    calls: list[str] = []
+
+    async def slow_handler(input_: _TestWriteInput, ctx: ToolContext) -> _TestWriteOutput:
+        calls.append(input_.value)
+        handler_started.set()
+        await allow_finish.wait()
+        return _TestWriteOutput(write_id="write_1")
+
+    broker = ToolBroker(
+        registry=_test_write_registry(slow_handler),
+        idempotency_store=event_store,
+        audit_sink=event_store,
+    )
+    ctx = _tool_context(idempotency_key="concurrent-write")
+    payload = {"value": "same operation"}
+
+    first_task = asyncio.create_task(broker.call("test.write", payload, ctx))
+    await handler_started.wait()
+    concurrent = await broker.call("test.write", payload, ctx)
+    allow_finish.set()
+    first = await first_task
+    replay = await broker.call("test.write", payload, ctx)
+    audit_records = event_store.list_tool_audit_records(tool_name="test.write")
+
+    assert first.status == "success"
+    assert concurrent.status == "failed"
+    assert concurrent.error_code == "CONFLICT"
+    assert concurrent.retryable is True
+    assert replay.status == "success"
+    assert replay.data == first.data
+    assert calls == ["same operation"]
+    assert [record.error_code for record in audit_records].count("CONFLICT") == 1
+    assert [record.error_code for record in audit_records].count(None) == 2
+    assert [record.replayed for record in audit_records].count(True) == 1
+
+
+@pytest.mark.asyncio
+async def test_sqlite_tool_idempotency_releases_failed_write_reservation(tmp_path):
+    event_store = SQLiteEventStore(tmp_path / "events.db")
+    call_count = 0
+
+    async def flaky_handler(input_: _TestWriteInput, ctx: ToolContext) -> _TestWriteOutput:
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            raise ToolError(
+                UPSTREAM_UNAVAILABLE,
+                "Injected upstream outage before the write completed.",
+                retryable=True,
+            )
+        return _TestWriteOutput(write_id=f"write_{call_count}")
+
+    broker = ToolBroker(
+        registry=_test_write_registry(flaky_handler),
+        idempotency_store=event_store,
+        audit_sink=event_store,
+    )
+    ctx = _tool_context(idempotency_key="release-after-failure")
+    payload = {"value": "retry after failed handler"}
+
+    failed = await broker.call("test.write", payload, ctx)
+    retry = await broker.call("test.write", payload, ctx)
+    replay = await broker.call("test.write", payload, ctx)
+    audit_records = event_store.list_tool_audit_records(tool_name="test.write")
+
+    assert failed.status == "failed"
+    assert failed.error_code == "UPSTREAM_UNAVAILABLE"
+    assert retry.status == "success"
+    assert retry.data == {"write_id": "write_2"}
+    assert replay.status == "success"
+    assert replay.data == retry.data
+    assert call_count == 2
+    assert [record.error_code for record in audit_records] == [
+        "UPSTREAM_UNAVAILABLE",
+        None,
+        None,
+    ]
+    assert [record.replayed for record in audit_records] == [False, False, True]
+
+
+@pytest.mark.asyncio
+async def test_sqlite_tool_idempotency_takes_over_stale_in_progress_reservation(tmp_path):
+    event_store = SQLiteEventStore(tmp_path / "events.db", tool_idempotency_lease_seconds=1)
+    calls: list[str] = []
+
+    async def handler(input_: _TestWriteInput, ctx: ToolContext) -> _TestWriteOutput:
+        calls.append(input_.value)
+        return _TestWriteOutput(write_id="write_after_stale")
+
+    broker = ToolBroker(
+        registry=_test_write_registry(handler),
+        idempotency_store=event_store,
+        audit_sink=event_store,
+    )
+    ctx = _tool_context(idempotency_key="stale-reservation")
+    payload = {"value": "recover stale operation"}
+    arg_hash = broker._hash(_TestWriteInput.model_validate(payload).model_dump(mode="json"))
+    key = broker._idempotency_key("test.write", ctx)
+    decision = event_store.reserve(key, arg_hash)
+    old_time = (utc_now() - timedelta(seconds=30)).isoformat()
+    with event_store._connect() as conn:
+        conn.execute(
+            """
+            update tool_idempotency
+            set updated_at = ?
+            where scope_key = ?
+            """,
+            (old_time, key),
+        )
+
+    recovered = await broker.call("test.write", payload, ctx)
+    replay = await broker.call("test.write", payload, ctx)
+
+    assert decision.status == "reserved"
+    assert recovered.status == "success"
+    assert replay.status == "success"
+    assert replay.data == recovered.data
+    assert calls == ["recover stale operation"]
+
+
+@pytest.mark.asyncio
+async def test_sqlite_tool_idempotency_releases_timeout_reservation(tmp_path):
+    event_store = SQLiteEventStore(tmp_path / "events.db")
+    attempts = 0
+
+    async def timeout_then_success(input_: _TestWriteInput, ctx: ToolContext) -> _TestWriteOutput:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            await asyncio.sleep(0.05)
+        return _TestWriteOutput(write_id=f"write_{attempts}")
+
+    broker = ToolBroker(
+        registry=_test_write_registry(timeout_then_success, timeout_ms=10),
+        idempotency_store=event_store,
+        audit_sink=event_store,
+    )
+    ctx = _tool_context(idempotency_key="release-after-timeout")
+    payload = {"value": "retry after timeout"}
+
+    timed_out = await broker.call("test.write", payload, ctx)
+    retry = await broker.call("test.write", payload, ctx)
+    replay = await broker.call("test.write", payload, ctx)
+    audit_records = event_store.list_tool_audit_records(tool_name="test.write")
+
+    assert timed_out.status == "failed"
+    assert timed_out.error_code == "TIMEOUT"
+    assert timed_out.retryable is True
+    assert retry.status == "success"
+    assert retry.data == {"write_id": "write_2"}
+    assert replay.status == "success"
+    assert replay.data == retry.data
+    assert attempts == 2
+    assert [record.error_code for record in audit_records] == ["TIMEOUT", None, None]
+    assert [record.replayed for record in audit_records] == [False, False, True]
+
+
+@pytest.mark.asyncio
+async def test_sqlite_tool_idempotency_rejects_concurrent_changed_payload(tmp_path):
+    event_store = SQLiteEventStore(tmp_path / "events.db")
+    handler_started = asyncio.Event()
+    allow_finish = asyncio.Event()
+    calls: list[str] = []
+
+    async def slow_handler(input_: _TestWriteInput, ctx: ToolContext) -> _TestWriteOutput:
+        calls.append(input_.value)
+        handler_started.set()
+        await allow_finish.wait()
+        return _TestWriteOutput(write_id="write_1")
+
+    broker = ToolBroker(
+        registry=_test_write_registry(slow_handler),
+        idempotency_store=event_store,
+        audit_sink=event_store,
+    )
+    ctx = _tool_context(idempotency_key="concurrent-different-payload")
+
+    first_task = asyncio.create_task(broker.call("test.write", {"value": "first"}, ctx))
+    await handler_started.wait()
+    conflict = await broker.call("test.write", {"value": "changed"}, ctx)
+    allow_finish.set()
+    first = await first_task
+    audit_records = event_store.list_tool_audit_records(tool_name="test.write")
+
+    assert first.status == "success"
+    assert conflict.status == "failed"
+    assert conflict.error_code == "IDEMPOTENCY_CONFLICT"
+    assert calls == ["first"]
+    assert [record.error_code for record in audit_records].count("IDEMPOTENCY_CONFLICT") == 1
+
+
+@pytest.mark.asyncio
+async def test_tool_audit_sink_failure_does_not_change_success_result():
+    calls: list[str] = []
+
+    async def handler(input_: _TestWriteInput, ctx: ToolContext) -> _TestWriteOutput:
+        calls.append(input_.value)
+        return _TestWriteOutput(write_id="write_1")
+
+    broker = ToolBroker(
+        registry=_test_write_registry(handler),
+        idempotency_store={},
+        audit_sink=_FailingAuditSink(),
+    )
+    ctx = _tool_context(idempotency_key="audit-sink-down")
+    payload = {"value": "audit sink should not hide success"}
+
+    first = await broker.call("test.write", payload, ctx)
+    replay = await broker.call("test.write", payload, ctx)
+
+    assert first.status == "success"
+    assert replay.status == "success"
+    assert replay.data == first.data
+    assert calls == ["audit sink should not hide success"]
+    assert broker.audit_log[-2].error_code is None
+    assert broker.audit_log[-1].replayed is True
+
+
 def _build_orchestrator(
     event_store: SQLiteEventStore,
     *,
@@ -394,3 +622,34 @@ def _tool_context(idempotency_key: str) -> ToolContext:
         tenant_id="demo_tenant",
         idempotency_key=idempotency_key,
     )
+
+
+class _TestWriteInput(BaseModel):
+    value: str
+    priority: str = "normal"
+
+
+class _TestWriteOutput(BaseModel):
+    write_id: str
+
+
+class _FailingAuditSink:
+    def append_tool_audit(self, record) -> None:
+        raise RuntimeError("audit sink down")
+
+
+def _test_write_registry(handler, *, timeout_ms: int = 1000) -> ToolRegistry:
+    registry = ToolRegistry()
+    registry.register(
+        ToolDefinition(
+            name="test.write",
+            description="Test write tool for idempotency boundary tests.",
+            input_model=_TestWriteInput,
+            output_model=_TestWriteOutput,
+            required_scopes=["ticket:write"],
+            timeout_ms=timeout_ms,
+            idempotent=False,
+            handler=handler,
+        )
+    )
+    return registry

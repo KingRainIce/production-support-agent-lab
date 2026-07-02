@@ -199,8 +199,9 @@ http://127.0.0.1:8000/api/v1/ready
 | Citation | 支撑回答的来源片段 | `RetrievalHit` | 避免客服幻觉政策 |
 | Trace/span | 一次 Agent run 的分步轨迹 | `AgentRunTrace` | 出问题时能定位是哪一步坏了 |
 | LLM Gateway | 模型调用抽象层，生产用 OpenAI provider，本地测试用 deterministic provider | `llm/gateway.py` | 统一模型路由、fallback、成本和延迟记录 |
-| Event store | append-only 事件日志，默认 SQLite | `memory/event_store.py` | 多轮记忆、审计、回放和重启恢复不能只靠内存对象 |
-| Idempotency | 同一个写请求重试不会重复产生副作用 | `ToolBroker` | 防止重复建单、重复退款 |
+| Event store | SQLite 持久层：append-only 事件日志 + 工具幂等/audit 记录 | `memory/event_store.py` | 多轮记忆、审计、回放、重启恢复和写工具去重不能只靠内存对象 |
+| Idempotency | 同一个写请求重试不会重复产生副作用；production SQLite 可跨重启 replay | `ToolBroker` + `SQLiteEventStore` | 防止重复建单、重复退款 |
+| Tool audit | 每次工具调用的脱敏审计记录；SQLite 持久化，进程内只保留 recent `audit_log` | `ToolBroker` + `SQLiteEventStore` | 排障、合规和事故复盘不能依赖临时日志 |
 | Golden eval | 高频核心路径的回归测试 | `examples/evals/golden_core.json` | 让改 prompt/代码有安全网 |
 | Monitor agent | 本地同进程检查对话质量，生产可改成异步 worker | `monitoring/monitor.py` | 发现线上漂移和高风险会话 |
 
@@ -475,7 +476,7 @@ python scripts/run_retrieval_eval.py
 
 ### 第 2.5 步：区分 thread state 和 event log
 
-`ConversationMemory` 保存当前对话可继续推进的短期状态；`SQLiteEventStore` 保存 append-only 事件，方便审计、回放和离线分析。
+`ConversationMemory` 保存当前对话可继续推进的短期状态；`SQLiteEventStore` 保存 message/agent/monitor 等 append-only 事件用于审计、回放和离线分析，同时同一 SQLite 持久层也承载 `tool_idempotency` 和 `tool_audit_records`。
 
 本地事件默认写到：
 

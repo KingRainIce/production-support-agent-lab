@@ -49,12 +49,12 @@ Do not expose `X-Demo-*` in production.
 
 `ConversationMemory` is short-term working state: recent messages, extracted facts, open questions, and a compact summary for the next turn.
 
-`SQLiteEventStore` is an append-only event log: user messages, assistant messages, completed agent runs, and monitor reviews are persisted for audit, replay, offline eval, and analytics.
+`SQLiteEventStore` is the local/production persistence boundary for the modular monolith: user messages, assistant messages, completed agent runs, monitor reviews, monitor triage events, tool idempotency records, and tool audit records are persisted for audit, replay, offline eval, and analytics.
 
 Production systems usually keep both:
 
 - Thread state lives in Redis/Postgres with fast reads and TTL.
-- Event logs live in Postgres/Kafka/warehouse with append-only semantics.
+- Event logs, idempotency records, and audit logs live in Postgres/Kafka/warehouse with append-only semantics and unique constraints.
 
 `memory/replay.py` connects the two: it rebuilds a fresh `ConversationState` from stored events. The admin replay endpoint uses that result for incident review without mutating live memory, while the orchestrator uses the same replay path to hydrate a missing conversation before the next turn after a process restart.
 
@@ -70,6 +70,7 @@ HTTP message
   -> DomainAgent.plan
   -> KnowledgeIndex.search / HTTPKnowledgeIndex.search
   -> ToolBroker.call
+     -> authorize, reserve/replay durable idempotency for writes, append tool audit record
   -> Orchestrator._compose_answer
   -> PolicyEngine.check_output
   -> OnlineMonitorAgent.review
@@ -115,7 +116,7 @@ HTTP message
 
 阶段 2：API 和 worker 分离，把 eval、monitor、summary 异步化。
 
-阶段 3：Tool Service 独立，把权限、审计、幂等做成统一能力。
+阶段 3：Tool Service 独立，把当前 `ToolBroker` 里的权限、审计、幂等治理服务化为跨入口、跨进程的统一能力。
 
 阶段 4：Knowledge Service 独立，接入 pgvector、OpenSearch、reranker。
 

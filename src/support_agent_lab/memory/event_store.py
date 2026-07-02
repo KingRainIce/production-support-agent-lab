@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -37,8 +38,9 @@ class SQLiteEventStore:
     production event log without forcing learners to run Postgres on day one.
     """
 
-    def __init__(self, path: str | Path) -> None:
+    def __init__(self, path: str | Path, tool_idempotency_lease_seconds: int = 300) -> None:
         self.path = Path(path)
+        self.tool_idempotency_lease_seconds = tool_idempotency_lease_seconds
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._init_schema()
 
@@ -93,7 +95,7 @@ class SQLiteEventStore:
             conn.execute("begin immediate")
             row = conn.execute(
                 """
-                select scope_key, argument_hash, status, result_json
+                select scope_key, argument_hash, status, result_json, updated_at
                 from tool_idempotency
                 where scope_key = ?
                 """,
@@ -116,6 +118,16 @@ class SQLiteEventStore:
                     status="replay",
                     result=ToolResult.model_validate(json.loads(row["result_json"])),
                 )
+            if self._idempotency_row_is_stale(row["updated_at"]):
+                conn.execute(
+                    """
+                    update tool_idempotency
+                    set status = ?, result_json = ?, updated_at = ?
+                    where scope_key = ? and argument_hash = ?
+                    """,
+                    ("in_progress", None, now, key, arg_hash),
+                )
+                return IdempotencyDecision(status="reserved")
             return IdempotencyDecision(status="in_progress")
 
     def complete(self, key: str, arg_hash: str, result: ToolResult) -> None:
@@ -389,6 +401,17 @@ class SQLiteEventStore:
         conn = sqlite3.connect(self.path)
         conn.row_factory = sqlite3.Row
         return conn
+
+    def _idempotency_row_is_stale(self, updated_at: str) -> bool:
+        if self.tool_idempotency_lease_seconds <= 0:
+            return True
+        try:
+            updated = datetime.fromisoformat(updated_at)
+        except ValueError:
+            return True
+        if updated.tzinfo is None:
+            updated = updated.replace(tzinfo=timezone.utc)
+        return updated <= utc_now() - timedelta(seconds=self.tool_idempotency_lease_seconds)
 
     def _init_schema(self) -> None:
         with self._connect() as conn:

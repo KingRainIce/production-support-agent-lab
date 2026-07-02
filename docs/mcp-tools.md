@@ -69,11 +69,13 @@ lookup tool
 
 ### Tool audit boundary
 
-`ToolBroker` records every tool call in an in-process recent `audit_log` and, when an audit sink is configured, persists it to SQLite `tool_audit_records`.
+`ToolBroker` always keeps a recent in-process `audit_log`. In the app container, `SQLiteEventStore` is configured as the audit sink, so tool calls are also persisted to SQLite `tool_audit_records`; standalone tests may omit the sink and keep only the recent log.
 
 Audit records include `audit_id`, `tenant_id`, `actor_user_id`, `request_id`, `trace_id`, `tool_name`, `argument_hash`, `status`, `latency_ms`, `error_code`, `idempotency_key_hash`, and whether the result was replayed from idempotency storage.
 
 They intentionally do not store raw arguments, raw idempotency keys, PII, tokens, or full upstream payloads. In scaled production, ship the same record shape to an append-only audit table, SIEM, or data warehouse.
+
+If the durable audit sink is temporarily unavailable, the tool result stays truthful and the in-process `audit_log` still records the call. Readiness and deployment checks should catch the durable sink failure; do not turn an already successful business write into a fake tool failure.
 
 ## 为什么写操作必须幂等
 
@@ -201,6 +203,7 @@ Idempotency-Key: <tenant>:<session>:<client-operation-id>
 - key 的存储维度至少包含 tenant、actor user、tool name 和 key。
 - TTL 取决于业务风险，工单类一般可保留 24 小时到 7 天。
 - 下游业务 API 也应接收 `Idempotency-Key`，不要只在 Agent 层做一次幂等。
+- 正在执行中的同 key 同 payload 写请求会返回 retryable `CONFLICT`；如果进程崩溃留下陈旧 `in_progress` 记录，SQLite store 会在租约过期后允许同 payload 接管并重新执行。
 
 Chat API path 和 MCP gateway path 的幂等来源不同：
 

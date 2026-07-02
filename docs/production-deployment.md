@@ -187,3 +187,4 @@ Do not prove production mode by checking only that the container starts. Verify:
 - A production `/api/v1/chat/messages` request creates matching `X-Trace-Id` / `X-Request-Id` entries in your business backend logs.
 - `X-Demo-User` / `X-Demo-Role` do not authenticate production requests.
 - Repeating a write tool call with the same idempotency key after process restart replays the first result instead of creating a second ticket.
+- Two concurrent write tool calls with the same idempotency key do not both reach the business side effect; one call should reserve the operation and the other should receive a retryable `CONFLICT` or replay the completed result.
