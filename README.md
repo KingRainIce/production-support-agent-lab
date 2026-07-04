@@ -321,6 +321,10 @@ APP_RATE_LIMIT_ENABLED=true
 APP_RATE_LIMIT_REQUESTS_PER_MINUTE=600
 APP_RATE_LIMIT_BURST=600
 APP_DATABASE_URL=sqlite:///./data/production/support-agent-lab.db
+APP_EVENT_RETENTION_DAYS=365
+APP_TOOL_AUDIT_RETENTION_DAYS=180
+APP_IDEMPOTENCY_RETENTION_DAYS=30
+APP_ALERT_DELIVERY_RETENTION_DAYS=90
 ```
 
 可选的主动告警 webhook：
@@ -393,7 +397,18 @@ eval:run
 knowledge:diagnose
 memory:replay
 admin:read
+admin:write
 ```
+
+SQLite event store 可以在线备份并先预演 retention：
+
+```bash
+python scripts/event_store_ops.py --database-url sqlite:///./data/production/support-agent-lab.db backup --output ./data/backups/support-agent-lab.db
+python scripts/event_store_ops.py --database-url sqlite:///./data/production/support-agent-lab.db retention --tenant-id your_real_tenant
+python scripts/event_store_ops.py --database-url sqlite:///./data/production/support-agent-lab.db retention --tenant-id your_real_tenant --apply
+```
+
+`retention` 默认 dry-run，事件日志默认不会删除；只有显式加 `--include-events` 才会清理旧 message/run/monitor/eval 事件。API 版本是 `POST /api/v1/admin/event-store/retention`，需要 `admin:write`、`audit:read` 和 `events:read`。
 
 ## Docker
 

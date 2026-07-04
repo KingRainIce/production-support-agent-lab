@@ -32,7 +32,7 @@ from support_agent_lab.api.request_signature import (
 from support_agent_lab.api.rate_limit import InMemoryRateLimiter, rate_limit_key, should_rate_limit
 from support_agent_lab.api.metrics import InMemoryHTTPMetrics, PROMETHEUS_CONTENT_TYPE, render_prometheus_metrics
 from support_agent_lab.evals.suites import STAGING_EVAL_SUITES
-from support_agent_lab.memory.event_store import StoredEvent
+from support_agent_lab.memory.event_store import EventStoreRetentionReport, StoredEvent
 from support_agent_lab.memory.knowledge_call import call_knowledge_search
 from support_agent_lab.memory.replay import MemoryReplayResult, replay_conversation_memory
 from support_agent_lab.models import (
@@ -111,6 +111,16 @@ class TriageMonitorAlertRequest(BaseModel):
 
 class AlertDeliveryOperatorActionRequest(BaseModel):
     note: str = Field(default="", max_length=1000)
+
+
+class EventStoreRetentionRequest(BaseModel):
+    dry_run: bool = True
+    include_events: bool = False
+    vacuum: bool = False
+    event_retention_days: int | None = Field(default=None, ge=30, le=3650)
+    tool_audit_retention_days: int | None = Field(default=None, ge=30, le=3650)
+    idempotency_retention_days: int | None = Field(default=None, ge=1, le=3650)
+    alert_delivery_retention_days: int | None = Field(default=None, ge=7, le=3650)
 
 
 class IncidentRunBundle(BaseModel):
@@ -2483,6 +2493,30 @@ def create_app() -> FastAPI:
             conversation_id=conversation_id,
             event_type=event_type,
             limit=limit,
+        )
+
+    @app.post("/api/v1/admin/event-store/retention")
+    def apply_event_store_retention(
+        body: EventStoreRetentionRequest,
+        deps: Annotated[AppContainer, Depends(get_container)],
+        actor: Annotated[RequestActor, Depends(get_request_actor)],
+    ) -> EventStoreRetentionReport:
+        require_admin(actor)
+        require_scope(actor, "admin:write")
+        require_scope(actor, "audit:read")
+        require_scope(actor, "events:read")
+        if not deps.event_store:
+            raise HTTPException(status_code=404, detail="Event store is not configured")
+        return deps.event_store.apply_retention_policy(
+            tenant_id=deps.settings.app_tenant_id,
+            dry_run=body.dry_run,
+            include_events=body.include_events,
+            vacuum=body.vacuum,
+            event_retention_days=body.event_retention_days or deps.settings.app_event_retention_days,
+            tool_audit_retention_days=body.tool_audit_retention_days or deps.settings.app_tool_audit_retention_days,
+            idempotency_retention_days=body.idempotency_retention_days or deps.settings.app_idempotency_retention_days,
+            alert_delivery_retention_days=body.alert_delivery_retention_days
+            or deps.settings.app_alert_delivery_retention_days,
         )
 
     @app.get("/api/v1/admin/conversations/{conversation_id}/memory/replay")

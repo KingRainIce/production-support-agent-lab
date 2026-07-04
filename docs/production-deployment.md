@@ -38,9 +38,15 @@ APP_LLM_CIRCUIT_FAILURE_THRESHOLD=5
 APP_LLM_CIRCUIT_RESET_SECONDS=30
 APP_READINESS_DEEP_CHECKS=true
 APP_DATABASE_URL=sqlite:///./data/production/support-agent-lab.db
+APP_EVENT_RETENTION_DAYS=365
+APP_TOOL_AUDIT_RETENTION_DAYS=180
+APP_IDEMPOTENCY_RETENTION_DAYS=30
+APP_ALERT_DELIVERY_RETENTION_DAYS=90
 ```
 
 `APP_DATABASE_URL` currently supports SQLite. It stores the append-only event log, monitor triage events, tool idempotency records, tool audit records, and alert delivery outbox. That is enough for a single-instance deployment or staging environment. For multi-instance production, replace `SQLiteEventStore` with a Postgres/Kafka-backed implementation before scaling horizontally.
+
+Retention knobs are intentionally conservative. They control the default window for event rows, durable tool audit rows, tool idempotency replay rows, and terminal alert-delivery rows. Event rows are never deleted by the retention operation unless the operator explicitly sets `include_events=true` or passes `--include-events` in the CLI.
 
 ## Business API contract
 
@@ -173,6 +179,7 @@ Admin role is not a wildcard. Production admin endpoints also require explicit m
 | `GET /api/v1/admin/monitor/alerts/{alert_key}/triage` | `monitor:read` |
 | `POST /api/v1/admin/monitor/alerts/{alert_key}/triage` | `monitor:write` |
 | `/api/v1/admin/events` | `events:read` |
+| `POST /api/v1/admin/event-store/retention` | `admin:write`, `audit:read`, `events:read`; dry-run by default. |
 | `POST /api/v1/admin/evals/regression-drafts` | `events:read`, `monitor:read` |
 | `POST /api/v1/admin/evals/golden` | `eval:run`; local/staging only. Disabled when `APP_ENV=production`. |
 | `POST /api/v1/admin/evals/staging` | `eval:run`; local/staging only. Runs bundled golden/security/tool/memory/routing/monitor/retrieval suites and appends suite + aggregate gate records. Disabled when `APP_ENV=production`. |
@@ -193,6 +200,47 @@ tool audit summary, and the latest `gate_name=staging`, `runner=aggregate`
 eval gate. It returns `passed`, `warn`, or `blocked` plus threshold evidence for
 each check. It never runs bundled evals, writes triage events, or returns raw
 tool arguments, raw monitor events, or eval answer text.
+
+## Event Store Operations
+
+Create an online SQLite backup before every manual retention run or release
+that changes persistence code:
+
+```bash
+python scripts/event_store_ops.py \
+  --database-url sqlite:///./data/production/support-agent-lab.db \
+  backup \
+  --output ./data/backups/support-agent-lab-$(date +%Y%m%d%H%M%S).db
+```
+
+The backup command uses SQLite's online backup API, then runs `pragma
+quick_check` and verifies the required tables exist in the copied database.
+
+Preview retention first:
+
+```bash
+python scripts/event_store_ops.py \
+  --database-url sqlite:///./data/production/support-agent-lab.db \
+  retention \
+  --tenant-id your_real_tenant
+```
+
+Apply retention only after checking the JSON report and confirming the backup:
+
+```bash
+python scripts/event_store_ops.py \
+  --database-url sqlite:///./data/production/support-agent-lab.db \
+  retention \
+  --tenant-id your_real_tenant \
+  --apply
+```
+
+By default, retention deletes only expired request nonces, old tool idempotency
+rows, old tool audit rows, and terminal `sent` / `closed` alert-delivery rows.
+It does not delete pending, failed, in-progress, or dead alert deliveries, and
+it skips the append-only event log unless `--include-events` is explicitly set.
+The same operation is exposed as `POST /api/v1/admin/event-store/retention` for
+trusted operators with `admin:write`, `audit:read`, and `events:read`.
 
 Monitor summary, events, and drilldown endpoints support `source=event_store`,
 `created_after`, `created_before`, and `order=desc|asc` for durable production

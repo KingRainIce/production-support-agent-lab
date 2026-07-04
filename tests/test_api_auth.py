@@ -1613,6 +1613,122 @@ def test_admin_can_list_persisted_events():
     }
 
 
+def test_admin_can_preview_and_apply_event_store_retention(tmp_path, monkeypatch):
+    monkeypatch.setenv("APP_DATABASE_URL", f"sqlite:///{tmp_path / 'events.db'}")
+    get_settings.cache_clear()
+    app_container = create_container()
+    event_store = app_container.event_store
+    assert event_store is not None
+    old = utc_now() - timedelta(days=400)
+    old_event = event_store.append(
+        tenant_id="demo_tenant",
+        conversation_id="conv_retention_api",
+        user_id="user_demo",
+        event_type="message.user",
+        payload={
+            "id": "msg_retention_api",
+            "tenant_id": "demo_tenant",
+            "conversation_id": "conv_retention_api",
+            "user_id": "user_demo",
+            "role": "user",
+            "content": "old api event",
+            "created_at": old.isoformat(),
+            "metadata": {},
+        },
+    )
+    event_store.append_tool_audit(
+        ToolAuditRecord(
+            id="audit_retention_api",
+            tenant_id="demo_tenant",
+            actor_user_id="operator",
+            request_id="req_retention_api",
+            trace_id="trace_retention_api",
+            tool_name="order.get",
+            argument_hash="arg_retention_api",
+            status=ToolStatus.success,
+            latency_ms=12,
+            error_code=None,
+            created_at=old.isoformat(),
+        )
+    )
+    with event_store._connect() as conn:
+        conn.execute("update events set created_at = ? where id = ?", (old.isoformat(), old_event.id))
+    app.dependency_overrides[get_container] = lambda: app_container
+    try:
+        client = TestClient(app)
+        forbidden = client.post(
+            "/api/v1/admin/event-store/retention",
+            json={"dry_run": True},
+        )
+        preview = client.post(
+            "/api/v1/admin/event-store/retention",
+            headers={"X-Demo-Role": "admin"},
+            json={
+                "dry_run": True,
+                "event_retention_days": 365,
+                "tool_audit_retention_days": 180,
+            },
+        )
+        applied = client.post(
+            "/api/v1/admin/event-store/retention",
+            headers={"X-Demo-Role": "admin"},
+            json={
+                "dry_run": False,
+                "include_events": True,
+                "event_retention_days": 365,
+                "tool_audit_retention_days": 180,
+            },
+        )
+    finally:
+        app.dependency_overrides.clear()
+        get_settings.cache_clear()
+
+    assert forbidden.status_code == 403
+    assert preview.status_code == 200
+    preview_body = preview.json()
+    assert preview_body["dry_run"] is True
+    assert preview_body["total_candidates"] == 2
+    assert preview_body["total_deleted"] == 0
+    assert applied.status_code == 200
+    applied_body = applied.json()
+    assert applied_body["dry_run"] is False
+    assert applied_body["include_events"] is True
+    assert applied_body["total_deleted"] == 2
+    assert event_store.list_events(tenant_id="demo_tenant", conversation_id="conv_retention_api") == []
+    assert event_store.list_tool_audit_records(trace_id="trace_retention_api") == []
+
+
+def test_production_event_store_retention_requires_admin_write_scope(tmp_path, monkeypatch):
+    monkeypatch.setenv("APP_DATABASE_URL", f"sqlite:///{tmp_path / 'events.db'}")
+    get_settings.cache_clear()
+    app_container = create_container()
+    app.dependency_overrides[get_container] = lambda: app_container
+    try:
+        monkeypatch.setenv("APP_ENV", "production")
+        monkeypatch.setenv("APP_INTERNAL_API_KEY", "secret")
+        monkeypatch.setenv("APP_ACTOR_SIGNATURE_SECRET", ACTOR_SIGNATURE_SECRET)
+        get_settings.cache_clear()
+        client = TestClient(app)
+        missing_write = client.post(
+            "/api/v1/admin/event-store/retention",
+            headers=_production_headers(scopes="audit:read,events:read"),
+            json={"dry_run": True},
+        )
+        allowed = client.post(
+            "/api/v1/admin/event-store/retention",
+            headers=_production_headers(scopes="admin:write,audit:read,events:read"),
+            json={"dry_run": True},
+        )
+    finally:
+        app.dependency_overrides.clear()
+        get_settings.cache_clear()
+
+    assert missing_write.status_code == 403
+    assert missing_write.json()["detail"] == "Missing required scope: admin:write"
+    assert allowed.status_code == 200
+    assert allowed.json()["dry_run"] is True
+
+
 def test_admin_can_read_monitor_summary():
     client = TestClient(app)
     session = client.post("/api/v1/chat/sessions", json={"user_id": "user_demo"}).json()

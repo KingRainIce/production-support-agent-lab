@@ -20,6 +20,7 @@ DEFAULT_USER_SCOPES = [
 DEFAULT_ADMIN_SCOPES = [
     *DEFAULT_USER_SCOPES,
     "admin:read",
+    "admin:write",
     "audit:read",
     "eval:read",
     "events:read",

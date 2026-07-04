@@ -23,7 +23,7 @@ SMOKE_ENV = {
 }
 
 AGENT_SCOPES = "crm:read,order:read,shipping:read,ticket:write,kb:read"
-ADMIN_SCOPES = "admin:read,events:read,monitor:read,audit:read,eval:read,memory:replay"
+ADMIN_SCOPES = "admin:read,admin:write,events:read,monitor:read,audit:read,eval:read,memory:replay"
 DOCKER_IMAGE = "production-support-agent-lab:release-check"
 
 
@@ -119,6 +119,7 @@ def validate_repo_root(root: Path) -> None:
         "scripts/run_eval.py",
         "scripts/run_monitor_eval.py",
         "scripts/run_retrieval_eval.py",
+        "scripts/event_store_ops.py",
         *[suite.path for suite in STAGING_EVAL_SUITES],
     ]
     missing = [path for path in required_paths if not (root / path).exists()]

@@ -54,6 +54,39 @@ class AlertDeliveryMetricSummary(BaseModel):
     last_dead_lettered_at: datetime | None = None
 
 
+class SQLiteBackupReport(BaseModel):
+    source_path: str
+    backup_path: str
+    size_bytes: int
+    page_count: int
+    started_at: datetime
+    completed_at: datetime
+    verified: bool
+    verification_detail: str
+
+
+class RetentionTableReport(BaseModel):
+    table_name: str
+    cutoff_at: datetime | None = None
+    candidate_count: int = 0
+    deleted_count: int = 0
+    action: str
+    reason: str = ""
+
+
+class EventStoreRetentionReport(BaseModel):
+    tenant_id: str
+    dry_run: bool
+    include_events: bool
+    vacuum_requested: bool
+    vacuum_performed: bool
+    started_at: datetime
+    completed_at: datetime
+    tables: list[RetentionTableReport]
+    total_candidates: int
+    total_deleted: int
+
+
 EVAL_GATE_EVENT_TYPE = "eval.gate.completed"
 ALERT_DELIVERY_ENQUEUED_EVENT_TYPE = "monitor.alert.delivery.enqueued"
 ALERT_DELIVERY_ATTEMPTED_EVENT_TYPE = "monitor.alert.delivery.attempted"
@@ -714,6 +747,186 @@ class SQLiteEventStore:
                 """,
                 (key, arg_hash, "in_progress"),
             )
+
+    def backup_to(
+        self,
+        target_path: str | Path,
+        *,
+        overwrite: bool = False,
+        verify: bool = True,
+    ) -> SQLiteBackupReport:
+        started_at = utc_now()
+        backup_path = Path(target_path)
+        if backup_path.resolve() == self.path.resolve():
+            raise ValueError("Backup path must be different from the source database path")
+        backup_path.parent.mkdir(parents=True, exist_ok=True)
+        if backup_path.exists():
+            if not overwrite:
+                raise FileExistsError(f"Backup already exists: {backup_path}")
+            backup_path.unlink()
+
+        with self._connect() as source, sqlite3.connect(backup_path) as destination:
+            source.backup(destination)
+
+        page_count = 0
+        verified = not verify
+        verification_detail = "verification skipped"
+        if verify:
+            with sqlite3.connect(backup_path) as conn:
+                quick_check = conn.execute("pragma quick_check").fetchone()
+                page_count = int(conn.execute("pragma page_count").fetchone()[0])
+                table_rows = conn.execute(
+                    """
+                    select name
+                    from sqlite_master
+                    where type = 'table'
+                      and name in (
+                        'events',
+                        'tool_idempotency',
+                        'tool_audit_records',
+                        'api_request_nonces',
+                        'alert_delivery_outbox'
+                      )
+                    """
+                ).fetchall()
+            verified = bool(quick_check and quick_check[0] == "ok" and len(table_rows) == 5)
+            verification_detail = "quick_check=ok; required tables present" if verified else "backup verification failed"
+            if not verified:
+                raise RuntimeError(verification_detail)
+        else:
+            with sqlite3.connect(backup_path) as conn:
+                page_count = int(conn.execute("pragma page_count").fetchone()[0])
+
+        return SQLiteBackupReport(
+            source_path=str(self.path),
+            backup_path=str(backup_path),
+            size_bytes=backup_path.stat().st_size,
+            page_count=page_count,
+            started_at=started_at,
+            completed_at=utc_now(),
+            verified=verified,
+            verification_detail=verification_detail,
+        )
+
+    def apply_retention_policy(
+        self,
+        *,
+        tenant_id: str,
+        dry_run: bool = True,
+        include_events: bool = False,
+        event_retention_days: int = 365,
+        tool_audit_retention_days: int = 180,
+        idempotency_retention_days: int = 30,
+        alert_delivery_retention_days: int = 90,
+        vacuum: bool = False,
+        now: datetime | None = None,
+    ) -> EventStoreRetentionReport:
+        started_at = utc_now()
+        effective_now = now or started_at
+        if effective_now.tzinfo is None:
+            effective_now = effective_now.replace(tzinfo=timezone.utc)
+        event_cutoff = effective_now - timedelta(days=event_retention_days)
+        audit_cutoff = effective_now - timedelta(days=tool_audit_retention_days)
+        idempotency_cutoff = effective_now - timedelta(days=idempotency_retention_days)
+        alert_cutoff = effective_now - timedelta(days=alert_delivery_retention_days)
+        reports: list[RetentionTableReport] = []
+
+        with self._connect() as conn:
+            if not dry_run:
+                conn.execute("begin immediate")
+            reports.append(
+                self._retention_table_report(
+                    conn,
+                    table_name="api_request_nonces",
+                    where_sql="tenant_id = ? and expires_at <= ?",
+                    params=[tenant_id, effective_now.isoformat()],
+                    dry_run=dry_run,
+                    cutoff_at=effective_now,
+                    reason="expired request-signature nonces",
+                )
+            )
+            reports.append(
+                self._retention_table_report(
+                    conn,
+                    table_name="tool_idempotency",
+                    where_sql="substr(scope_key, 1, ?) = ? and updated_at <= ?",
+                    params=[len(f"{tenant_id}:"), f"{tenant_id}:", idempotency_cutoff.isoformat()],
+                    dry_run=dry_run,
+                    cutoff_at=idempotency_cutoff,
+                    reason="old tool idempotency replay entries",
+                )
+            )
+            reports.append(
+                self._retention_table_report(
+                    conn,
+                    table_name="tool_audit_records",
+                    where_sql="tenant_id = ? and created_at <= ?",
+                    params=[tenant_id, audit_cutoff.isoformat()],
+                    dry_run=dry_run,
+                    cutoff_at=audit_cutoff,
+                    reason="old durable tool audit rows",
+                )
+            )
+            reports.append(
+                self._retention_table_report(
+                    conn,
+                    table_name="alert_delivery_outbox",
+                    where_sql="tenant_id = ? and status in ('sent', 'closed') and updated_at <= ?",
+                    params=[tenant_id, alert_cutoff.isoformat()],
+                    dry_run=dry_run,
+                    cutoff_at=alert_cutoff,
+                    reason="terminal alert deliveries only; pending, failed, in-progress, and dead rows are retained",
+                )
+            )
+            if include_events:
+                reports.append(
+                    self._retention_table_report(
+                        conn,
+                        table_name="events",
+                        where_sql="tenant_id = ? and created_at <= ?",
+                        params=[tenant_id, event_cutoff.isoformat()],
+                        dry_run=dry_run,
+                        cutoff_at=event_cutoff,
+                        reason="old append-only event log rows; run export or backup before applying",
+                    )
+                )
+            else:
+                candidate_count = self._retention_count(
+                    conn,
+                    table_name="events",
+                    where_sql="tenant_id = ? and created_at <= ?",
+                    params=[tenant_id, event_cutoff.isoformat()],
+                )
+                reports.append(
+                    RetentionTableReport(
+                        table_name="events",
+                        cutoff_at=event_cutoff,
+                        candidate_count=candidate_count,
+                        deleted_count=0,
+                        action="skipped",
+                        reason="event log retention requires include_events=true",
+                    )
+                )
+
+        total_deleted = sum(report.deleted_count for report in reports)
+        vacuum_performed = False
+        if vacuum and not dry_run and total_deleted > 0:
+            with self._connect() as conn:
+                conn.execute("vacuum")
+            vacuum_performed = True
+
+        return EventStoreRetentionReport(
+            tenant_id=tenant_id,
+            dry_run=dry_run,
+            include_events=include_events,
+            vacuum_requested=vacuum,
+            vacuum_performed=vacuum_performed,
+            started_at=started_at,
+            completed_at=utc_now(),
+            tables=reports,
+            total_candidates=sum(report.candidate_count for report in reports),
+            total_deleted=total_deleted,
+        )
 
     def append_tool_audit(self, record: ToolAuditRecord) -> None:
         with self._connect() as conn:
@@ -1385,6 +1598,46 @@ class SQLiteEventStore:
                 ),
             )
             conn.rollback()
+
+    def _retention_table_report(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        table_name: str,
+        where_sql: str,
+        params: list[Any],
+        dry_run: bool,
+        cutoff_at: datetime,
+        reason: str,
+    ) -> RetentionTableReport:
+        candidate_count = self._retention_count(
+            conn,
+            table_name=table_name,
+            where_sql=where_sql,
+            params=params,
+        )
+        deleted_count = 0
+        if not dry_run and candidate_count:
+            conn.execute(f"delete from {table_name} where {where_sql}", params)
+            deleted_count = candidate_count
+        return RetentionTableReport(
+            table_name=table_name,
+            cutoff_at=cutoff_at,
+            candidate_count=candidate_count,
+            deleted_count=deleted_count,
+            action="dry_run" if dry_run else "deleted",
+            reason=reason,
+        )
+
+    def _retention_count(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        table_name: str,
+        where_sql: str,
+        params: list[Any],
+    ) -> int:
+        return int(conn.execute(f"select count(*) from {table_name} where {where_sql}", params).fetchone()[0])
 
     def _connect(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self.path)

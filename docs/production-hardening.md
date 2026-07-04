@@ -38,6 +38,8 @@
 
 所有表都带 `tenant_id`。
 
+当前 SQLite baseline 已提供在线备份和 retention 操作：`python scripts/event_store_ops.py ... backup` 会复制并校验数据库；`... retention` 默认 dry-run，`--apply` 才删除，`--include-events` 才会清理 append-only event log。生产发布前应先备份，再预演 retention JSON，再执行 apply。
+
 ## 安全
 
 - API 鉴权：JWT、session 或 API key。
@@ -87,6 +89,7 @@ monitor.review
 ## 发布策略
 
 - PR 跑 `python scripts/run_release_check.py`，并构建 Docker image。
+- 发布或清理前跑 `python scripts/event_store_ops.py --database-url <sqlite-url> backup --output <backup.db>`，再 dry-run retention。
 - local/staging 控制台可用 `/api/v1/admin/evals/staging` 重跑同一批 bundled eval suites，并把 suite + aggregate gate history 写入事件流。
 - merge/release 前检查 `/api/v1/admin/promotion/gate`，确认 readiness、monitor pressure、tool failure rate 和最新 staging eval 都没有阻断项。
 - merge 前确认 GitHub Actions 全绿，并用 staging replay 复核真实流量样本。

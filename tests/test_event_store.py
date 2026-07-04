@@ -12,6 +12,8 @@ from support_agent_lab.memory.event_store import EVAL_GATE_EVENT_TYPE
 from support_agent_lab.memory.replay import replay_conversation_memory
 from support_agent_lab.memory.store import ConversationMemory, KnowledgeIndex
 from support_agent_lab.models import (
+    AlertDeliveryRecord,
+    AlertDeliveryStatus,
     EvalGateRecord,
     IntentType,
     Message,
@@ -20,6 +22,7 @@ from support_agent_lab.models import (
     MonitorEvent,
     RiskLevel,
     Role,
+    ToolResult,
     ToolStatus,
     utc_now,
 )
@@ -435,6 +438,157 @@ def test_event_store_health_check_verifies_write_without_persisting_probe(tmp_pa
     event_store.health_check()
 
     assert event_store.list_events(event_type="readiness.probe") == []
+
+
+def test_event_store_creates_verified_online_backup(tmp_path):
+    event_store = SQLiteEventStore(tmp_path / "events.db")
+    event = event_store.append(
+        tenant_id="demo_tenant",
+        conversation_id="conv_backup",
+        user_id="user_demo",
+        event_type="message.user",
+        payload=_message_payload("msg_backup", "conv_backup", "backup me"),
+    )
+
+    report = event_store.backup_to(tmp_path / "backups" / "events.backup.db")
+    backup_store = SQLiteEventStore(tmp_path / "backups" / "events.backup.db")
+
+    assert report.verified is True
+    assert report.size_bytes > 0
+    assert report.page_count > 0
+    assert "quick_check=ok" in report.verification_detail
+    assert backup_store.list_events(tenant_id="demo_tenant")[0].id == event.id
+    with pytest.raises(FileExistsError):
+        event_store.backup_to(tmp_path / "backups" / "events.backup.db")
+    with pytest.raises(ValueError, match="source database"):
+        event_store.backup_to(tmp_path / "events.db", overwrite=True)
+
+
+def test_event_store_retention_policy_dry_run_and_apply(tmp_path):
+    event_store = SQLiteEventStore(tmp_path / "events.db")
+    now = utc_now()
+    old = now - timedelta(days=400)
+    fresh = now - timedelta(days=5)
+
+    old_event = event_store.append(
+        tenant_id="demo_tenant",
+        conversation_id="conv_old",
+        user_id="user_demo",
+        event_type="message.user",
+        payload=_message_payload("msg_old", "conv_old", "old event", created_at=old),
+    )
+    fresh_event = event_store.append(
+        tenant_id="demo_tenant",
+        conversation_id="conv_fresh",
+        user_id="user_demo",
+        event_type="message.user",
+        payload=_message_payload("msg_fresh", "conv_fresh", "fresh event", created_at=fresh),
+    )
+    event_store.append_tool_audit(
+        _tool_audit_record("audit_old", created_at=old.isoformat())
+    )
+    event_store.append_tool_audit(
+        _tool_audit_record("audit_fresh", created_at=fresh.isoformat())
+    )
+    event_store.reserve("demo_tenant:user_demo:ticket.create:old", "hash_old")
+    event_store.complete(
+        "demo_tenant:user_demo:ticket.create:old",
+        "hash_old",
+        _tool_result("ticket.create"),
+    )
+    event_store.reserve("demo_tenant:user_demo:ticket.create:fresh", "hash_fresh")
+    event_store.complete(
+        "demo_tenant:user_demo:ticket.create:fresh",
+        "hash_fresh",
+        _tool_result("ticket.create"),
+    )
+    event_store.reserve_api_request_nonce(
+        tenant_id="demo_tenant",
+        actor_user_id="operator",
+        nonce="fresh_nonce",
+        request_hash="hash_fresh",
+        expires_at=(now + timedelta(minutes=10)).isoformat(),
+    )
+    event_store.reserve_api_request_nonce(
+        tenant_id="demo_tenant",
+        actor_user_id="operator",
+        nonce="expired_nonce",
+        request_hash="hash_expired",
+        expires_at=(now - timedelta(minutes=1)).isoformat(),
+    )
+    old_sent = _alert_delivery("deliv_old_sent", old, status=AlertDeliveryStatus.sent)
+    old_dead = _alert_delivery("deliv_old_dead", old, status=AlertDeliveryStatus.dead)
+    fresh_sent = _alert_delivery("deliv_fresh_sent", fresh, status=AlertDeliveryStatus.sent)
+    for record in (old_sent, old_dead, fresh_sent):
+        event_store.enqueue_alert_delivery(record)
+
+    with event_store._connect() as conn:
+        conn.execute("update events set created_at = ? where id = ?", (old.isoformat(), old_event.id))
+        conn.execute("update events set created_at = ? where id = ?", (fresh.isoformat(), fresh_event.id))
+        conn.execute("update tool_idempotency set updated_at = ? where scope_key like ?", (old.isoformat(), "%:old"))
+        conn.execute(
+            "update tool_idempotency set updated_at = ? where scope_key like ?",
+            (fresh.isoformat(), "%:fresh"),
+        )
+        conn.execute(
+            "update alert_delivery_outbox set status = ?, updated_at = ?, delivered_at = ? where id = ?",
+            (AlertDeliveryStatus.sent.value, old.isoformat(), old.isoformat(), old_sent.id),
+        )
+        conn.execute(
+            "update alert_delivery_outbox set status = ?, updated_at = ?, dead_lettered_at = ? where id = ?",
+            (AlertDeliveryStatus.dead.value, old.isoformat(), old.isoformat(), old_dead.id),
+        )
+        conn.execute(
+            "update alert_delivery_outbox set status = ?, updated_at = ?, delivered_at = ? where id = ?",
+            (AlertDeliveryStatus.sent.value, fresh.isoformat(), fresh.isoformat(), fresh_sent.id),
+        )
+
+    dry_run = event_store.apply_retention_policy(
+        tenant_id="demo_tenant",
+        dry_run=True,
+        now=now,
+        event_retention_days=365,
+        tool_audit_retention_days=180,
+        idempotency_retention_days=30,
+        alert_delivery_retention_days=90,
+    )
+    applied = event_store.apply_retention_policy(
+        tenant_id="demo_tenant",
+        dry_run=False,
+        now=now,
+        event_retention_days=365,
+        tool_audit_retention_days=180,
+        idempotency_retention_days=30,
+        alert_delivery_retention_days=90,
+    )
+    event_apply = event_store.apply_retention_policy(
+        tenant_id="demo_tenant",
+        dry_run=False,
+        include_events=True,
+        now=now,
+        event_retention_days=365,
+        tool_audit_retention_days=180,
+        idempotency_retention_days=30,
+        alert_delivery_retention_days=90,
+    )
+
+    assert dry_run.total_candidates == 5
+    assert dry_run.total_deleted == 0
+    assert _table_report(dry_run, "events").action == "skipped"
+    assert applied.total_deleted == 4
+    assert _table_report(applied, "events").deleted_count == 0
+    assert event_apply.total_deleted == 1
+    assert event_store.list_events(tenant_id="demo_tenant", conversation_id="conv_old") == []
+    assert event_store.list_events(tenant_id="demo_tenant", conversation_id="conv_fresh")[0].id == fresh_event.id
+    assert _count_rows(event_store, "tool_audit_records", "id = 'audit_old'") == 0
+    assert _count_rows(event_store, "tool_audit_records", "id = 'audit_fresh'") == 1
+    assert _count_rows(event_store, "api_request_nonces", "nonce = 'expired_nonce'") == 0
+    assert _count_rows(event_store, "api_request_nonces", "nonce = 'fresh_nonce'") == 1
+    assert _count_rows(event_store, "tool_idempotency", "scope_key like '%:old'") == 0
+    assert _count_rows(event_store, "tool_idempotency", "scope_key like '%:fresh'") == 1
+    assert _count_rows(event_store, "alert_delivery_outbox", "id = 'deliv_old_sent'") == 0
+    assert _count_rows(event_store, "alert_delivery_outbox", "id = 'deliv_old_dead'") == 1
+    assert _count_rows(event_store, "alert_delivery_outbox", "id = 'deliv_fresh_sent'") == 1
 
 
 @pytest.mark.asyncio
@@ -1160,6 +1314,83 @@ def _tool_context(idempotency_key: str) -> ToolContext:
         tenant_id="demo_tenant",
         idempotency_key=idempotency_key,
     )
+
+
+def _message_payload(
+    message_id: str,
+    conversation_id: str,
+    content: str,
+    *,
+    created_at=None,
+) -> dict:
+    return {
+        "id": message_id,
+        "tenant_id": "demo_tenant",
+        "conversation_id": conversation_id,
+        "user_id": "user_demo",
+        "role": "user",
+        "content": content,
+        "created_at": (created_at or utc_now()).isoformat(),
+        "metadata": {},
+    }
+
+
+def _tool_result(name: str) -> ToolResult:
+    return ToolResult(
+        name=name,
+        status=ToolStatus.success,
+        data={"ok": True},
+    )
+
+
+def _tool_audit_record(record_id: str, *, created_at: str) -> ToolAuditRecord:
+    return ToolAuditRecord(
+        id=record_id,
+        tenant_id="demo_tenant",
+        actor_user_id="operator",
+        request_id=f"req_{record_id}",
+        trace_id=f"trace_{record_id}",
+        tool_name="order.get",
+        argument_hash=f"arg_{record_id}",
+        status=ToolStatus.success,
+        latency_ms=12,
+        error_code=None,
+        created_at=created_at,
+    )
+
+
+def _alert_delivery(
+    record_id: str,
+    timestamp,
+    *,
+    status: AlertDeliveryStatus,
+) -> AlertDeliveryRecord:
+    return AlertDeliveryRecord(
+        id=record_id,
+        tenant_id="demo_tenant",
+        alert_key=f"agent:test:{record_id}",
+        severity="P1",
+        destination_hash=f"dest_{record_id}",
+        status=status,
+        alert_first_seen_at=timestamp,
+        alert_last_seen_at=timestamp,
+        alert_count=1,
+        reason=f"test alert {record_id}",
+        sample_event_ids=[f"mon_{record_id}"],
+        sample_run_ids=[f"run_{record_id}"],
+        payload_hash=f"payload_{record_id}",
+        created_at=timestamp,
+        updated_at=timestamp,
+    )
+
+
+def _table_report(report, table_name: str):
+    return next(item for item in report.tables if item.table_name == table_name)
+
+
+def _count_rows(event_store: SQLiteEventStore, table_name: str, where_sql: str) -> int:
+    with event_store._connect() as conn:
+        return int(conn.execute(f"select count(*) from {table_name} where {where_sql}").fetchone()[0])
 
 
 class _TestWriteInput(BaseModel):
