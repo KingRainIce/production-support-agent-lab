@@ -236,6 +236,43 @@ export type ToolAuditRecord = {
   created_at: string | null;
 };
 
+export type ToolAuditErrorSummary = {
+  error_code: string;
+  count: number;
+};
+
+export type ToolAuditToolSummary = {
+  tool_name: string;
+  total_calls: number;
+  failed_calls: number;
+  replayed_calls: number;
+  failure_rate: number;
+  average_latency_ms: number | null;
+  max_latency_ms: number | null;
+  top_error_code: string | null;
+  last_seen_at: string | null;
+};
+
+export type ToolAuditSummary = {
+  total_calls: number;
+  failed_calls: number;
+  replayed_calls: number;
+  failure_rate: number;
+  average_latency_ms: number | null;
+  max_latency_ms: number | null;
+  window_start: string | null;
+  window_end: string | null;
+  top_error_codes: ToolAuditErrorSummary[];
+  tools: ToolAuditToolSummary[];
+};
+
+export type ToolAuditSearchResponse = {
+  records: ToolAuditRecord[];
+  summary: ToolAuditSummary;
+  limit: number;
+  order: "asc" | "desc";
+};
+
 export type StoredEvent = {
   id: string;
   tenant_id: string;

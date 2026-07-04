@@ -36,12 +36,14 @@ import {
   buildIncidentBrief,
   buildOpsMetrics,
   buildRunSearchStats,
+  buildToolAuditStats,
   filterAndSortAlerts,
   type AlertSort,
   type AlertStatusFilter,
   type IncidentBrief,
   type OpsMetrics,
-  type RunSearchStats
+  type RunSearchStats,
+  type ToolAuditStats
 } from "@/src/shared/ops";
 import type {
   AgentRunSearchItem,
@@ -57,6 +59,7 @@ import type {
   RetrievalHit,
   StoredEvent,
   ToolAuditRecord,
+  ToolAuditSearchResponse,
   ToolResult,
   TraceSpan
 } from "@/src/shared/types";
@@ -84,12 +87,25 @@ type TimelineStepId =
   | "monitor";
 
 type EvidenceTab = "brief" | "citations" | "tool-audit" | "memory" | "triage";
-type WorkspaceMode = "alerts" | "runs";
+type WorkspaceMode = "alerts" | "runs" | "tools";
 
 type LoadInput = {
   runId?: string | null;
   alertKey?: string | null;
 };
+
+type ToolAuditSearchOverrides = Partial<{
+  toolName: string;
+  actorUserId: string;
+  traceId: string;
+  requestId: string;
+  status: string;
+  errorCode: string;
+  replayed: string;
+  createdAfter: string;
+  createdBefore: string;
+  order: "asc" | "desc";
+}>;
 
 type TimelineStep = {
   id: TimelineStepId;
@@ -119,6 +135,19 @@ export default function Home() {
   const [runSearchOffset, setRunSearchOffset] = useState(0);
   const [runSearchLoading, setRunSearchLoading] = useState(false);
   const [runSearchError, setRunSearchError] = useState<string | null>(null);
+  const [toolAuditToolName, setToolAuditToolName] = useState("");
+  const [toolAuditActorUserId, setToolAuditActorUserId] = useState("");
+  const [toolAuditTraceId, setToolAuditTraceId] = useState("");
+  const [toolAuditRequestId, setToolAuditRequestId] = useState("");
+  const [toolAuditStatus, setToolAuditStatus] = useState("");
+  const [toolAuditErrorCode, setToolAuditErrorCode] = useState("");
+  const [toolAuditReplayed, setToolAuditReplayed] = useState("");
+  const [toolAuditCreatedAfter, setToolAuditCreatedAfter] = useState("");
+  const [toolAuditCreatedBefore, setToolAuditCreatedBefore] = useState("");
+  const [toolAuditOrder, setToolAuditOrder] = useState<"asc" | "desc">("desc");
+  const [toolAuditResults, setToolAuditResults] = useState<ToolAuditSearchResponse | null>(null);
+  const [toolAuditLoading, setToolAuditLoading] = useState(false);
+  const [toolAuditError, setToolAuditError] = useState<string | null>(null);
   const [severityFilter, setSeverityFilter] = useState("all");
   const [statusFilter, setStatusFilter] = useState<AlertStatusFilter>("active");
   const [queueQuery, setQueueQuery] = useState("");
@@ -204,6 +233,11 @@ export default function Home() {
     [runSearchResults]
   );
 
+  const toolAuditStats = useMemo<ToolAuditStats>(
+    () => buildToolAuditStats(toolAuditResults?.summary ?? null),
+    [toolAuditResults]
+  );
+
   useEffect(() => {
     setAssigneeUserId(activeAlert?.assignee_user_id ?? "");
   }, [activeAlert?.key, activeAlert?.assignee_user_id]);
@@ -280,12 +314,71 @@ export default function Home() {
     void searchRuns(0);
   }
 
+  async function searchToolAudit(overrides: ToolAuditSearchOverrides = {}) {
+    setToolAuditLoading(true);
+    setToolAuditError(null);
+    try {
+      const values = {
+        toolName: overrides.toolName ?? toolAuditToolName,
+        actorUserId: overrides.actorUserId ?? toolAuditActorUserId,
+        traceId: overrides.traceId ?? toolAuditTraceId,
+        requestId: overrides.requestId ?? toolAuditRequestId,
+        status: overrides.status ?? toolAuditStatus,
+        errorCode: overrides.errorCode ?? toolAuditErrorCode,
+        replayed: overrides.replayed ?? toolAuditReplayed,
+        createdAfter: overrides.createdAfter ?? toolAuditCreatedAfter,
+        createdBefore: overrides.createdBefore ?? toolAuditCreatedBefore,
+        order: overrides.order ?? toolAuditOrder
+      };
+      if (overrides.toolName !== undefined) {
+        setToolAuditToolName(overrides.toolName);
+      }
+      if (overrides.traceId !== undefined) {
+        setToolAuditTraceId(overrides.traceId);
+      }
+      const params = new URLSearchParams();
+      for (const [key, value] of Object.entries(values)) {
+        const trimmed = String(value).trim();
+        if (trimmed) {
+          params.set(key, trimmed);
+        }
+      }
+      params.set("limit", "50");
+      const response = await fetch(`/api/console/tools/audit?${params.toString()}`, {
+        cache: "no-store"
+      });
+      const data = await response.json();
+      if (!response.ok) {
+        throw new Error(data.detail ?? "Tool audit search failed");
+      }
+      setToolAuditResults(data as ToolAuditSearchResponse);
+    } catch (nextError) {
+      setToolAuditError(nextError instanceof Error ? nextError.message : "Tool audit search failed");
+    } finally {
+      setToolAuditLoading(false);
+    }
+  }
+
+  function submitToolAuditSearch(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    void searchToolAudit();
+  }
+
   function openRunFromWorkbench(item: AgentRunSearchItem) {
     setWorkspaceMode("runs");
     setSelectedAlertKey(null);
     setSelectedRunId(item.id);
     setRunQuery(item.id);
     void loadSnapshot({ runId: item.id });
+  }
+
+  function openToolAuditRecord(record: ToolAuditRecord) {
+    setWorkspaceMode("tools");
+    setEvidenceTab("tool-audit");
+    setSelectedAlertKey(null);
+    setSelectedRunId(record.trace_id);
+    setRunQuery(record.trace_id);
+    void loadSnapshot({ runId: record.trace_id });
   }
 
   async function submitTriage(status: string, nextAssigneeUserId?: string | null, noteOverride?: string) {
@@ -413,7 +506,11 @@ export default function Home() {
             }
           }
           if (target === "tools") {
+            setWorkspaceMode("tools");
             setEvidenceTab("tool-audit");
+            if (!toolAuditResults && !toolAuditLoading) {
+              void searchToolAudit();
+            }
           }
           if (target === "memory") {
             setEvidenceTab("memory");
@@ -586,7 +683,39 @@ export default function Home() {
         <OpsOverview metrics={opsMetrics} snapshot={snapshot} evalReport={evalReport} />
 
         <section className="workspace">
-          {workspaceMode === "runs" ? (
+          {workspaceMode === "tools" ? (
+            <ToolAuditWorkbenchPanel
+              results={toolAuditResults}
+              stats={toolAuditStats}
+              loading={toolAuditLoading}
+              error={toolAuditError}
+              selectedTraceId={selectedRunId}
+              tools={snapshot?.tools ?? []}
+              toolName={toolAuditToolName}
+              actorUserId={toolAuditActorUserId}
+              traceId={toolAuditTraceId}
+              requestId={toolAuditRequestId}
+              status={toolAuditStatus}
+              errorCode={toolAuditErrorCode}
+              replayed={toolAuditReplayed}
+              createdAfter={toolAuditCreatedAfter}
+              createdBefore={toolAuditCreatedBefore}
+              order={toolAuditOrder}
+              onToolName={setToolAuditToolName}
+              onActorUserId={setToolAuditActorUserId}
+              onTraceId={setToolAuditTraceId}
+              onRequestId={setToolAuditRequestId}
+              onStatus={setToolAuditStatus}
+              onErrorCode={setToolAuditErrorCode}
+              onReplayed={setToolAuditReplayed}
+              onCreatedAfter={setToolAuditCreatedAfter}
+              onCreatedBefore={setToolAuditCreatedBefore}
+              onOrder={setToolAuditOrder}
+              onSubmit={submitToolAuditSearch}
+              onSearch={searchToolAudit}
+              onOpenRecord={openToolAuditRecord}
+            />
+          ) : workspaceMode === "runs" ? (
             <RunWorkbenchPanel
               results={runSearchResults}
               stats={runSearchStats}
@@ -1175,6 +1304,232 @@ function RunWorkbenchPanel({
           </div>
         </div>
       ) : null}
+    </aside>
+  );
+}
+
+function ToolAuditWorkbenchPanel({
+  results,
+  stats,
+  loading,
+  error,
+  selectedTraceId,
+  tools,
+  toolName,
+  actorUserId,
+  traceId,
+  requestId,
+  status,
+  errorCode,
+  replayed,
+  createdAfter,
+  createdBefore,
+  order,
+  onToolName,
+  onActorUserId,
+  onTraceId,
+  onRequestId,
+  onStatus,
+  onErrorCode,
+  onReplayed,
+  onCreatedAfter,
+  onCreatedBefore,
+  onOrder,
+  onSubmit,
+  onSearch,
+  onOpenRecord
+}: {
+  results: ToolAuditSearchResponse | null;
+  stats: ToolAuditStats;
+  loading: boolean;
+  error: string | null;
+  selectedTraceId: string | null;
+  tools: ConsoleSnapshot["tools"];
+  toolName: string;
+  actorUserId: string;
+  traceId: string;
+  requestId: string;
+  status: string;
+  errorCode: string;
+  replayed: string;
+  createdAfter: string;
+  createdBefore: string;
+  order: "asc" | "desc";
+  onToolName: (value: string) => void;
+  onActorUserId: (value: string) => void;
+  onTraceId: (value: string) => void;
+  onRequestId: (value: string) => void;
+  onStatus: (value: string) => void;
+  onErrorCode: (value: string) => void;
+  onReplayed: (value: string) => void;
+  onCreatedAfter: (value: string) => void;
+  onCreatedBefore: (value: string) => void;
+  onOrder: (value: "asc" | "desc") => void;
+  onSubmit: (event: FormEvent<HTMLFormElement>) => void;
+  onSearch: (overrides?: ToolAuditSearchOverrides) => void | Promise<void>;
+  onOpenRecord: (record: ToolAuditRecord) => void;
+}) {
+  const records = results?.records ?? [];
+  const summaryTools = results?.summary.tools ?? [];
+  const toolDefinitions = new Map(tools.map((tool) => [tool.name, tool]));
+  return (
+    <aside className="alerts-panel run-workbench tool-workbench">
+      <div className="panel-heading">
+        <div>
+          <span>Tool Audit</span>
+          <strong>{stats.totalCalls} calls in scope</strong>
+        </div>
+      </div>
+
+      <form className="run-search-form" onSubmit={onSubmit}>
+        <label className="search-control">
+          <Wrench size={14} />
+          <input
+            value={toolName}
+            onChange={(event) => onToolName(event.target.value)}
+            placeholder="shipping.track"
+            aria-label="Filter audit by tool name"
+          />
+        </label>
+        <div className="run-filter-grid">
+          <label className="filter-control">
+            <Filter size={14} />
+            <select value={status} onChange={(event) => onStatus(event.target.value)} aria-label="Filter audit by status">
+              <option value="">Any status</option>
+              <option value="success">Success</option>
+              <option value="failed">Failed</option>
+              <option value="skipped">Skipped</option>
+            </select>
+          </label>
+          <label className="filter-control">
+            <RefreshCw size={14} />
+            <select value={replayed} onChange={(event) => onReplayed(event.target.value)} aria-label="Filter replayed tool calls">
+              <option value="">Any replay</option>
+              <option value="true">Replayed</option>
+              <option value="false">Fresh calls</option>
+            </select>
+          </label>
+          <label className="filter-control">
+            <SlidersHorizontal size={14} />
+            <select
+              value={order}
+              onChange={(event) => onOrder(event.target.value === "asc" ? "asc" : "desc")}
+              aria-label="Sort audit records"
+            >
+              <option value="desc">Newest</option>
+              <option value="asc">Oldest</option>
+            </select>
+          </label>
+          <label className="field-label compact">
+            Error
+            <input value={errorCode} onChange={(event) => onErrorCode(event.target.value)} placeholder="TIMEOUT" />
+          </label>
+        </div>
+        <label className="field-label">
+          Trace
+          <input value={traceId} onChange={(event) => onTraceId(event.target.value)} placeholder="run_..." />
+        </label>
+        <label className="field-label">
+          Actor
+          <input value={actorUserId} onChange={(event) => onActorUserId(event.target.value)} placeholder="user_demo" />
+        </label>
+        <label className="field-label">
+          Request
+          <input value={requestId} onChange={(event) => onRequestId(event.target.value)} placeholder="req_..." />
+        </label>
+        <div className="tool-window-grid">
+          <label className="field-label compact">
+            Since
+            <input
+              value={createdAfter}
+              onChange={(event) => onCreatedAfter(event.target.value)}
+              placeholder="2026-07-04T00:00:00Z"
+            />
+          </label>
+          <label className="field-label compact">
+            Before
+            <input
+              value={createdBefore}
+              onChange={(event) => onCreatedBefore(event.target.value)}
+              placeholder="2026-07-04T12:00:00Z"
+            />
+          </label>
+        </div>
+        <button className="primary-button" type="submit" disabled={loading}>
+          {loading ? <Loader2 className="spin" size={16} /> : <Search size={16} />}
+          Search audit
+        </button>
+      </form>
+
+      <div className="run-search-stats" aria-label="Tool audit SLA stats">
+        <Metric label="Failed" value={String(stats.failedCalls)} />
+        <Metric label="Fail rate" value={formatRate(stats.failureRate)} />
+        <Metric label="Replay" value={String(stats.replayedCalls)} />
+        <Metric label="Avg" value={stats.averageLatencyMs === null ? "n/a" : formatDurationMs(stats.averageLatencyMs)} />
+      </div>
+
+      {summaryTools.length ? (
+        <div className="tool-summary-list" aria-label="Tool failure summary">
+          {summaryTools.slice(0, 4).map((tool) => (
+            <button
+              type="button"
+              key={tool.tool_name}
+              onClick={() => void onSearch({ toolName: tool.tool_name })}
+              className={tool.failed_calls ? "tool-summary-row has-failures" : "tool-summary-row"}
+            >
+              <span>{tool.tool_name}</span>
+              <strong>{formatRate(tool.failure_rate)} fail</strong>
+              <small>{tool.top_error_code ?? `${tool.total_calls} calls`}</small>
+            </button>
+          ))}
+        </div>
+      ) : null}
+
+      <div className={error ? "inline-error" : "sr-only"} role="status" aria-live="polite">
+        {error ?? `${records.length} tool audit records loaded`}
+      </div>
+
+      <div className="run-result-list">
+        {loading && !results ? <LoadingBlock /> : null}
+        {!loading && results && !records.length ? (
+          <PanelEmpty title="No audit records found" detail="Try a broader tool, trace, actor, or error filter." />
+        ) : null}
+        {!results && !loading ? (
+          <PanelEmpty title="Search persisted audit" detail="Find real tool calls by tool, trace, actor, replay, or error." />
+        ) : null}
+        {records.map((record) => {
+          const definition = toolDefinitions.get(record.tool_name);
+          const breachedSla = definition ? record.latency_ms > definition.timeout_ms : false;
+          return (
+            <button
+              type="button"
+              className={`run-result-card tool-audit-card ${record.trace_id === selectedTraceId ? "is-selected" : ""}`}
+              key={record.id}
+              onClick={() => onOpenRecord(record)}
+              aria-label={`Open run ${record.trace_id} for ${record.status} ${record.tool_name} audit record`}
+              aria-pressed={record.trace_id === selectedTraceId}
+            >
+              <div className="run-result-top">
+                <Badge tone={statusTone(record.status)}>{record.status}</Badge>
+                <time title={record.created_at ?? undefined}>{ageLabel(record.created_at)}</time>
+              </div>
+              <strong>{record.tool_name}</strong>
+              <span>{record.trace_id}</span>
+              <div className="tag-row">
+                {record.error_code ? <Badge tone="warn">{record.error_code}</Badge> : <Badge tone="success">clean</Badge>}
+                {record.replayed ? <Badge>replayed</Badge> : null}
+                {breachedSla ? <Badge tone="danger">SLA {definition?.timeout_ms}ms</Badge> : null}
+              </div>
+              <div className="run-result-meta">
+                <span>{record.actor_user_id}</span>
+                <span>{record.request_id}</span>
+                <span>{formatDurationMs(record.latency_ms)}</span>
+              </div>
+              <small className="hash-line">args {record.argument_hash}</small>
+            </button>
+          );
+        })}
+      </div>
     </aside>
   );
 }
@@ -2153,11 +2508,14 @@ function sumLatency(tools: ToolResult[]) {
 }
 
 function statusTone(status: string | undefined): "neutral" | "success" | "warn" | "danger" {
-  if (status === "completed") {
+  if (status === "completed" || status === "success") {
     return "success";
   }
   if (status === "failed") {
     return "danger";
+  }
+  if (status === "skipped") {
+    return "warn";
   }
   return "neutral";
 }

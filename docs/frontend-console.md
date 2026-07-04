@@ -50,6 +50,9 @@ real local FastAPI endpoints:
 4. `GET /api/v1/admin/incidents/runs/{run_id}?include_memory=true`
 5. `GET /api/v1/admin/runs` when the `Runs` workbench searches persisted
    history.
+6. `GET /api/v1/admin/tools/audit` and
+   `GET /api/v1/admin/tools/audit/summary` when the `Tools` workbench searches
+   persisted tool calls and SLA/failure aggregates.
 
 ## Production Run
 
@@ -84,6 +87,10 @@ The backend listens on `8000`; the console listens on `3000`.
 - Run workbench backed by persisted `agent.run.completed` events. It searches
   by run text, user, conversation, intent, route, status, and tool error code,
   then opens the same trace/evidence investigation view.
+- Tools workbench backed by persisted `tool_audit_records`. It filters by tool,
+  trace, request, actor, status, error code, replay state, and time window; the
+  SLA stats come from the backend summary endpoint, not from only the visible
+  page of rows.
 - Queue workbench controls for severity, status, search, new-event filtering,
   and severity/newest/count sorting.
 - Operations overview for active alerts, P0/P1 pressure, readiness, grounded
@@ -109,11 +116,13 @@ memory, safety, monitoring, and incident response.
 1. Start in the alert queue and keep the default `Active` status filter on.
 2. Switch to `Runs` when you need historical investigation across users,
    conversations, routes, or tool error codes.
-3. Use alert search to find a run, owner, alert reason, or event id.
-4. Assign the alert before investigation so ownership is explicit.
-5. Open `Brief` first for the operator summary and recommended next actions.
-6. Drill into `Citations`, `Tool Audit`, and `Memory` only when the brief points
+3. Switch to `Tools` when the problem is a timeout, upstream error, replay, or
+   suspected idempotency issue; open any audit row to hydrate its full run.
+4. Use alert search to find a run, owner, alert reason, or event id.
+5. Assign the alert before investigation so ownership is explicit.
+6. Open `Brief` first for the operator summary and recommended next actions.
+7. Drill into `Citations`, `Tool Audit`, and `Memory` only when the brief points
    at missing grounding, tool failures, or replay questions.
-7. Run the eval gate in local/staging before promoting prompt, routing, tool, or
+8. Run the eval gate in local/staging before promoting prompt, routing, tool, or
    policy changes.
-8. Resolve only after the triage note explains customer impact and mitigation.
+9. Resolve only after the triage note explains customer impact and mitigation.

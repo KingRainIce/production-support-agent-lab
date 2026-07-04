@@ -18,7 +18,13 @@ from support_agent_lab.models import (
     new_id,
     utc_now,
 )
-from support_agent_lab.tools.registry import IdempotencyDecision, ToolAuditRecord
+from support_agent_lab.tools.registry import (
+    IdempotencyDecision,
+    ToolAuditErrorSummary,
+    ToolAuditRecord,
+    ToolAuditSummary,
+    ToolAuditToolSummary,
+)
 
 
 class StoredEvent(BaseModel):
@@ -30,6 +36,18 @@ class StoredEvent(BaseModel):
     event_type: str
     payload: dict[str, Any]
     created_at: str
+
+
+def _rate(numerator: int, denominator: int) -> float:
+    if denominator <= 0:
+        return 0.0
+    return round(numerator / denominator, 4)
+
+
+def _rounded_average(value: Any) -> float | None:
+    if value is None:
+        return None
+    return round(float(value), 2)
 
 
 class SQLiteEventStore:
@@ -237,6 +255,171 @@ class SQLiteEventStore:
                    idempotency_key_hash, replayed, created_at
             from tool_audit_records
         """
+        clauses, params = self._tool_audit_filter_clauses(
+            tenant_id=tenant_id,
+            tool_name=tool_name,
+            actor_user_id=actor_user_id,
+            trace_id=trace_id,
+            request_id=request_id,
+            status=status,
+            error_code=error_code,
+            replayed=replayed,
+            created_after=created_after,
+            created_before=created_before,
+        )
+        if clauses:
+            sql += " where " + " and ".join(clauses)
+        direction = "desc" if order == "desc" else "asc"
+        sql += f" order by rowid {direction} limit ?"
+        params.append(limit)
+        with self._connect() as conn:
+            rows = conn.execute(sql, params).fetchall()
+        return [
+            ToolAuditRecord(
+                id=row["id"],
+                tenant_id=row["tenant_id"],
+                actor_user_id=row["actor_user_id"],
+                request_id=row["request_id"],
+                trace_id=row["trace_id"],
+                tool_name=row["tool_name"],
+                argument_hash=row["argument_hash"],
+                status=ToolStatus(row["status"]),
+                latency_ms=row["latency_ms"],
+                error_code=row["error_code"],
+                idempotency_key_hash=row["idempotency_key_hash"],
+                replayed=bool(row["replayed"]),
+                created_at=row["created_at"],
+            )
+            for row in rows
+        ]
+
+    def summarize_tool_audit_records(
+        self,
+        *,
+        tenant_id: str | None = None,
+        tool_name: str | None = None,
+        actor_user_id: str | None = None,
+        trace_id: str | None = None,
+        request_id: str | None = None,
+        status: str | None = None,
+        error_code: str | None = None,
+        replayed: bool | None = None,
+        created_after: str | None = None,
+        created_before: str | None = None,
+    ) -> ToolAuditSummary:
+        clauses, params = self._tool_audit_filter_clauses(
+            tenant_id=tenant_id,
+            tool_name=tool_name,
+            actor_user_id=actor_user_id,
+            trace_id=trace_id,
+            request_id=request_id,
+            status=status,
+            error_code=error_code,
+            replayed=replayed,
+            created_after=created_after,
+            created_before=created_before,
+        )
+        where_sql = f" where {' and '.join(clauses)}" if clauses else ""
+        totals_sql = f"""
+            select
+              count(*) as total_calls,
+              coalesce(sum(case when status = 'failed' then 1 else 0 end), 0) as failed_calls,
+              coalesce(sum(case when replayed = 1 then 1 else 0 end), 0) as replayed_calls,
+              avg(latency_ms) as average_latency_ms,
+              max(latency_ms) as max_latency_ms,
+              min(created_at) as window_start,
+              max(created_at) as window_end
+            from tool_audit_records
+            {where_sql}
+        """
+        tools_sql = f"""
+            select
+              tool_name,
+              count(*) as total_calls,
+              coalesce(sum(case when status = 'failed' then 1 else 0 end), 0) as failed_calls,
+              coalesce(sum(case when replayed = 1 then 1 else 0 end), 0) as replayed_calls,
+              avg(latency_ms) as average_latency_ms,
+              max(latency_ms) as max_latency_ms,
+              max(created_at) as last_seen_at
+            from tool_audit_records
+            {where_sql}
+            group by tool_name
+            order by failed_calls desc, total_calls desc, tool_name asc
+            limit 50
+        """
+        error_clauses = [*clauses, "error_code is not null"]
+        error_where_sql = " where " + " and ".join(error_clauses)
+        errors_sql = f"""
+            select error_code, count(*) as count
+            from tool_audit_records
+            {error_where_sql}
+            group by error_code
+            order by count desc, error_code asc
+            limit 5
+        """
+        tool_errors_sql = f"""
+            select tool_name, error_code, count(*) as count
+            from tool_audit_records
+            {error_where_sql}
+            group by tool_name, error_code
+            order by count desc, error_code asc
+        """
+        with self._connect() as conn:
+            totals = conn.execute(totals_sql, params).fetchone()
+            tool_rows = conn.execute(tools_sql, params).fetchall()
+            error_rows = conn.execute(errors_sql, params).fetchall()
+            tool_error_rows = conn.execute(tool_errors_sql, params).fetchall()
+
+        top_error_by_tool: dict[str, str] = {}
+        for row in tool_error_rows:
+            top_error_by_tool.setdefault(row["tool_name"], row["error_code"])
+
+        total_calls = int(totals["total_calls"] or 0)
+        failed_calls = int(totals["failed_calls"] or 0)
+        replayed_calls = int(totals["replayed_calls"] or 0)
+        return ToolAuditSummary(
+            total_calls=total_calls,
+            failed_calls=failed_calls,
+            replayed_calls=replayed_calls,
+            failure_rate=_rate(failed_calls, total_calls),
+            average_latency_ms=_rounded_average(totals["average_latency_ms"]),
+            max_latency_ms=totals["max_latency_ms"],
+            window_start=totals["window_start"],
+            window_end=totals["window_end"],
+            top_error_codes=[
+                ToolAuditErrorSummary(error_code=row["error_code"], count=int(row["count"]))
+                for row in error_rows
+            ],
+            tools=[
+                ToolAuditToolSummary(
+                    tool_name=row["tool_name"],
+                    total_calls=int(row["total_calls"]),
+                    failed_calls=int(row["failed_calls"]),
+                    replayed_calls=int(row["replayed_calls"]),
+                    failure_rate=_rate(int(row["failed_calls"]), int(row["total_calls"])),
+                    average_latency_ms=_rounded_average(row["average_latency_ms"]),
+                    max_latency_ms=row["max_latency_ms"],
+                    top_error_code=top_error_by_tool.get(row["tool_name"]),
+                    last_seen_at=row["last_seen_at"],
+                )
+                for row in tool_rows
+            ],
+        )
+
+    def _tool_audit_filter_clauses(
+        self,
+        *,
+        tenant_id: str | None = None,
+        tool_name: str | None = None,
+        actor_user_id: str | None = None,
+        trace_id: str | None = None,
+        request_id: str | None = None,
+        status: str | None = None,
+        error_code: str | None = None,
+        replayed: bool | None = None,
+        created_after: str | None = None,
+        created_before: str | None = None,
+    ) -> tuple[list[str], list[Any]]:
         clauses: list[str] = []
         params: list[Any] = []
         if tenant_id:
@@ -269,31 +452,7 @@ class SQLiteEventStore:
         if created_before:
             clauses.append("created_at <= ?")
             params.append(created_before)
-        if clauses:
-            sql += " where " + " and ".join(clauses)
-        direction = "desc" if order == "desc" else "asc"
-        sql += f" order by rowid {direction} limit ?"
-        params.append(limit)
-        with self._connect() as conn:
-            rows = conn.execute(sql, params).fetchall()
-        return [
-            ToolAuditRecord(
-                id=row["id"],
-                tenant_id=row["tenant_id"],
-                actor_user_id=row["actor_user_id"],
-                request_id=row["request_id"],
-                trace_id=row["trace_id"],
-                tool_name=row["tool_name"],
-                argument_hash=row["argument_hash"],
-                status=ToolStatus(row["status"]),
-                latency_ms=row["latency_ms"],
-                error_code=row["error_code"],
-                idempotency_key_hash=row["idempotency_key_hash"],
-                replayed=bool(row["replayed"]),
-                created_at=row["created_at"],
-            )
-            for row in rows
-        ]
+        return clauses, params
 
     def append(
         self,
@@ -695,6 +854,18 @@ class SQLiteEventStore:
             conn.execute("create index if not exists idx_tool_audit_tenant on tool_audit_records(tenant_id)")
             conn.execute("create index if not exists idx_tool_audit_trace on tool_audit_records(trace_id)")
             conn.execute("create index if not exists idx_tool_audit_tool on tool_audit_records(tool_name)")
+            conn.execute(
+                "create index if not exists idx_tool_audit_tenant_created on tool_audit_records(tenant_id, created_at)"
+            )
+            conn.execute(
+                "create index if not exists idx_tool_audit_tenant_tool_created on tool_audit_records(tenant_id, tool_name, created_at)"
+            )
+            conn.execute(
+                "create index if not exists idx_tool_audit_tenant_status_created on tool_audit_records(tenant_id, status, created_at)"
+            )
+            conn.execute(
+                "create index if not exists idx_tool_audit_tenant_error_created on tool_audit_records(tenant_id, error_code, created_at)"
+            )
             conn.execute(
                 """
                 create table if not exists api_request_nonces (

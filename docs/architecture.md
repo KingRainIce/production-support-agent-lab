@@ -52,7 +52,7 @@ Do not expose `X-Demo-*` in production.
 
 `SQLiteEventStore` is the local/production persistence boundary for the modular monolith: user messages, assistant messages, completed agent runs, monitor reviews, monitor triage events, tool idempotency records, and tool audit records are persisted for audit, replay, offline eval, and analytics.
 
-`/api/v1/admin/tools/audit` exposes those tool audit records through the same admin boundary as monitor and event-log APIs. It is intentionally hash-only for tool arguments and idempotency keys, so incident responders can correlate trace/request/tool failures without leaking raw parameters or PII.
+`/api/v1/admin/tools/audit` exposes those tool audit records through the same admin boundary as monitor and event-log APIs. It is intentionally hash-only for tool arguments and idempotency keys, so incident responders can correlate trace/request/tool failures without leaking raw parameters or PII. `/api/v1/admin/tools/audit/summary` uses the same filters and scope to return SLA/failure aggregates by tool and error code without returning arguments, tool payloads, or hashes.
 
 `events.run_id` is persisted and indexed for agent-run and monitor events. `/api/v1/admin/incidents/runs/{run_id}` uses that index to bundle the persisted run, monitor events, durable tool audit records, and optional memory replay after live process state is gone.
 

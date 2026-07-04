@@ -3,6 +3,7 @@ import {
   buildIncidentBrief,
   buildOpsMetrics,
   buildRunSearchStats,
+  buildToolAuditStats,
   filterAndSortAlerts
 } from "../src/shared/ops";
 import type { ConsoleSnapshot, MonitorAlert } from "../src/shared/types";
@@ -195,5 +196,64 @@ describe("ops workbench helpers", () => {
     expect(stats.toolFailureRuns).toBe(1);
     expect(stats.humanReviewRuns).toBe(1);
     expect(stats.averageDurationMs).toBe(1000);
+  });
+
+  it("summarizes persisted tool audit SLA metrics", () => {
+    const stats = buildToolAuditStats({
+      total_calls: 5,
+      failed_calls: 3,
+      replayed_calls: 1,
+      failure_rate: 0.6,
+      average_latency_ms: 264,
+      max_latency_ms: 500,
+      window_start: "2026-07-04T00:00:00.000Z",
+      window_end: "2026-07-04T00:05:00.000Z",
+      top_error_codes: [
+        { error_code: "TIMEOUT", count: 2 },
+        { error_code: "BAD_REQUEST", count: 1 }
+      ],
+      tools: [
+        {
+          tool_name: "order.get",
+          total_calls: 2,
+          failed_calls: 1,
+          replayed_calls: 1,
+          failure_rate: 0.5,
+          average_latency_ms: 150,
+          max_latency_ms: 200,
+          top_error_code: "BAD_REQUEST",
+          last_seen_at: "2026-07-04T00:04:00.000Z"
+        },
+        {
+          tool_name: "shipping.track",
+          total_calls: 3,
+          failed_calls: 2,
+          replayed_calls: 0,
+          failure_rate: 0.6667,
+          average_latency_ms: 340,
+          max_latency_ms: 500,
+          top_error_code: "TIMEOUT",
+          last_seen_at: "2026-07-04T00:03:00.000Z"
+        }
+      ]
+    });
+
+    expect(stats.totalCalls).toBe(5);
+    expect(stats.failedCalls).toBe(3);
+    expect(stats.replayedCalls).toBe(1);
+    expect(stats.failureRate).toBe(0.6);
+    expect(stats.averageLatencyMs).toBe(264);
+    expect(stats.worstToolName).toBe("shipping.track");
+    expect(stats.topErrorCode).toBe("TIMEOUT");
+  });
+
+  it("returns stable empty tool audit stats", () => {
+    const stats = buildToolAuditStats(null);
+
+    expect(stats.totalCalls).toBe(0);
+    expect(stats.failedCalls).toBe(0);
+    expect(stats.averageLatencyMs).toBeNull();
+    expect(stats.worstToolName).toBe("none");
+    expect(stats.topErrorCode).toBe("none");
   });
 });

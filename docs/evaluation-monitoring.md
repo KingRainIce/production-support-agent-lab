@@ -181,6 +181,13 @@ curl "http://127.0.0.1:8000/api/v1/admin/tools/audit?trace_id=run_abc123&tool_na
   -H "X-Demo-Role: admin"
 ```
 
+同一过滤条件也可以查聚合视图，用于判断是否是单次失败还是某个工具的 SLA/错误率问题：
+
+```bash
+curl "http://127.0.0.1:8000/api/v1/admin/tools/audit/summary?tool_name=shipping.track" \
+  -H "X-Demo-Role: admin"
+```
+
 `trace.tool_results` 表示 Agent 当时看到的结果；tool audit 表示 `ToolBroker` 已持久化的调用事实。二者如果不一致，优先排查 audit sink、event store 和 trace 写入时序。
 
 也可以用 incident bundle 一次拿到复盘材料：

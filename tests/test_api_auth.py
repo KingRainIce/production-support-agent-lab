@@ -577,6 +577,53 @@ def test_admin_can_list_tool_audit_records_without_raw_arguments(tmp_path, monke
     assert invalid_limit.status_code == 422
 
 
+def test_admin_can_read_tool_audit_summary_without_raw_arguments(tmp_path, monkeypatch):
+    monkeypatch.setenv("APP_DATABASE_URL", f"sqlite:///{tmp_path / 'events.db'}")
+    get_settings.cache_clear()
+    app_container = create_container()
+    app.dependency_overrides[get_container] = lambda: app_container
+    try:
+        client = TestClient(app)
+        session = client.post("/api/v1/chat/sessions", json={"user_id": "user_demo"}).json()
+        message = client.post(
+            "/api/v1/chat/messages",
+            json={
+                "conversation_id": session["conversation_id"],
+                "user_id": "user_demo",
+                "content": "Where is order A1002 shipping?",
+            },
+        ).json()
+        trace_id = message["trace_id"]
+
+        forbidden = client.get(
+            "/api/v1/admin/tools/audit/summary",
+            params={"trace_id": trace_id},
+        )
+        allowed = client.get(
+            "/api/v1/admin/tools/audit/summary",
+            headers={"X-Demo-Role": "admin"},
+            params={"trace_id": trace_id},
+        )
+    finally:
+        app.dependency_overrides.clear()
+        get_settings.cache_clear()
+
+    assert forbidden.status_code == 403
+    assert allowed.status_code == 200
+    body = allowed.json()
+    assert body["total_calls"] >= 2
+    assert body["failed_calls"] == 0
+    assert body["average_latency_ms"] is not None
+    assert {tool["tool_name"] for tool in body["tools"]} >= {"order.get", "shipping.track"}
+    serialized = str(body)
+    assert "A1002" not in serialized
+    assert "YT99887766CN" not in serialized
+    assert "argument_hash" not in serialized
+    assert "idempotency_key_hash" not in serialized
+    assert "arguments" not in serialized
+    assert "data" not in serialized
+
+
 def test_production_admin_tool_audit_requires_explicit_audit_scope(tmp_path, monkeypatch):
     monkeypatch.setenv("APP_DATABASE_URL", f"sqlite:///{tmp_path / 'events.db'}")
     get_settings.cache_clear()
@@ -624,6 +671,55 @@ def test_production_admin_tool_audit_requires_explicit_audit_scope(tmp_path, mon
     assert metadata_scope_only.json()["detail"] == "Missing required scope: audit:read"
     assert allowed.status_code == 200
     assert {record["tool_name"] for record in allowed.json()} >= {"order.get", "shipping.track"}
+
+
+def test_production_admin_tool_audit_summary_requires_explicit_audit_scope(tmp_path, monkeypatch):
+    monkeypatch.setenv("APP_DATABASE_URL", f"sqlite:///{tmp_path / 'events.db'}")
+    get_settings.cache_clear()
+    app_container = create_container()
+    app.dependency_overrides[get_container] = lambda: app_container
+    try:
+        client = TestClient(app)
+        session = client.post("/api/v1/chat/sessions", json={"user_id": "user_demo"}).json()
+        message = client.post(
+            "/api/v1/chat/messages",
+            json={
+                "conversation_id": session["conversation_id"],
+                "user_id": "user_demo",
+                "content": "Where is order A1002 shipping?",
+            },
+        ).json()
+        trace_id = message["trace_id"]
+
+        monkeypatch.setenv("APP_ENV", "production")
+        monkeypatch.setenv("APP_INTERNAL_API_KEY", "secret")
+        monkeypatch.setenv("APP_ACTOR_SIGNATURE_SECRET", ACTOR_SIGNATURE_SECRET)
+        get_settings.cache_clear()
+        missing_scope = client.get(
+            "/api/v1/admin/tools/audit/summary",
+            headers=_production_headers(scopes="events:read"),
+            params={"trace_id": trace_id},
+        )
+        metadata_scope_only = client.get(
+            "/api/v1/admin/tools/audit/summary",
+            headers=_production_headers(scopes="admin:read"),
+            params={"trace_id": trace_id},
+        )
+        allowed = client.get(
+            "/api/v1/admin/tools/audit/summary",
+            headers=_production_headers(scopes="audit:read"),
+            params={"trace_id": trace_id},
+        )
+    finally:
+        app.dependency_overrides.clear()
+        get_settings.cache_clear()
+
+    assert missing_scope.status_code == 403
+    assert missing_scope.json()["detail"] == "Missing required scope: audit:read"
+    assert metadata_scope_only.status_code == 403
+    assert metadata_scope_only.json()["detail"] == "Missing required scope: audit:read"
+    assert allowed.status_code == 200
+    assert {tool["tool_name"] for tool in allowed.json()["tools"]} >= {"order.get", "shipping.track"}
 
 
 def test_admin_can_read_incident_bundle_from_event_store_after_live_state_is_cleared(tmp_path, monkeypatch):

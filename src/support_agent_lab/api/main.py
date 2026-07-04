@@ -37,7 +37,7 @@ from support_agent_lab.models import (
     new_id,
 )
 from support_agent_lab.monitoring.monitor import MonitorSummary, summarize_monitor_events
-from support_agent_lab.tools.registry import ToolAuditRecord
+from support_agent_lab.tools.registry import ToolAuditRecord, ToolAuditSummary
 from support_agent_lab.config import get_settings
 
 
@@ -229,6 +229,48 @@ def create_app() -> FastAPI:
             created_before=created_before.isoformat() if created_before else None,
             limit=limit,
             order=order,
+        )
+
+    @app.get("/api/v1/admin/tools/audit/summary")
+    def summarize_tool_audit_records(
+        deps: Annotated[AppContainer, Depends(get_container)],
+        actor: Annotated[RequestActor, Depends(get_request_actor)],
+        tool_name: Annotated[str | None, Query()] = None,
+        actor_user_id: Annotated[str | None, Query()] = None,
+        trace_id: Annotated[str | None, Query()] = None,
+        request_id: Annotated[str | None, Query()] = None,
+        status: Annotated[str | None, Query(pattern="^(success|failed|skipped)$")] = None,
+        error_code: Annotated[str | None, Query()] = None,
+        replayed: Annotated[bool | None, Query()] = None,
+        created_after: Annotated[datetime | None, Query()] = None,
+        created_before: Annotated[datetime | None, Query()] = None,
+    ) -> ToolAuditSummary:
+        require_admin(actor)
+        require_scope(actor, "audit:read")
+        if not deps.event_store:
+            return ToolAuditSummary(
+                total_calls=0,
+                failed_calls=0,
+                replayed_calls=0,
+                failure_rate=0.0,
+                average_latency_ms=None,
+                max_latency_ms=None,
+                window_start=None,
+                window_end=None,
+                top_error_codes=[],
+                tools=[],
+            )
+        return deps.event_store.summarize_tool_audit_records(
+            tenant_id=deps.settings.app_tenant_id,
+            tool_name=tool_name,
+            actor_user_id=actor_user_id,
+            trace_id=trace_id,
+            request_id=request_id,
+            status=status,
+            error_code=error_code,
+            replayed=replayed,
+            created_after=created_after.isoformat() if created_after else None,
+            created_before=created_before.isoformat() if created_before else None,
         )
 
     @app.get("/api/v1/admin/monitor/events")

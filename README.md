@@ -10,8 +10,8 @@ It is not a mock dashboard: the UI calls server-side BFF routes, and those
 routes call the real FastAPI Agent API for monitor alerts, run traces,
 citations, tool audit, memory replay, and triage writes.
 It now includes queue search/sort/status filtering, operator assignment,
-persisted run search, copyable incident briefs, readiness preflight, and a
-staging eval gate.
+persisted run search, a Tools workbench for durable audit/SLA investigation,
+copyable incident briefs, readiness preflight, and a staging eval gate.
 
 Start with `docs/frontend-console.md` after the backend quick start. In local
 learning mode, the `Run Scenario` button creates real local events through
@@ -495,6 +495,13 @@ curl "http://127.0.0.1:8000/api/v1/admin/tools/audit?trace_id=run_abc123&tool_na
 
 这个接口返回 `trace_id`、`request_id`、`tool_name`、`status`、`error_code`、`latency_ms`、`actor_user_id`、`argument_hash`、`idempotency_key_hash`、`replayed` 和 `created_at`。它不返回 raw arguments、PII、token 或完整上游 payload。
 
+查看同一过滤条件下的工具失败率、平均延迟、top error 和按工具聚合：
+
+```bash
+curl "http://127.0.0.1:8000/api/v1/admin/tools/audit/summary?trace_id=run_abc123" \
+  -H "X-Demo-Role: admin"
+```
+
 查看单次线上事件的调查包。它会把 run trace、monitor event、tool audit 和可选 memory replay 放在一个响应里，适合从告警直接进入复盘：
 
 ```bash
@@ -625,7 +632,7 @@ flowchart LR
 | --- | --- | --- | --- | --- |
 | 意图识别 | `trace.intent`、`missing_slots` | `src/support_agent_lab/agent/intent.py` | `docs/intent-playbook.md` | `examples/evals/routing_regression.json` |
 | 多 agent routing | `trace.route.target`、`allowed_tools` | `src/support_agent_lab/agent/router.py` | `docs/routing-playbook.md` | `examples/evals/routing_regression.json` |
-| MCP/工具治理 | `trace.tool_results`、`/api/v1/admin/tools/audit` | `src/support_agent_lab/tools/registry.py`、`src/support_agent_lab/mcp/adapter.py` | `docs/mcp-tools.md`、`docs/tool-failure-playbook.md` | `tests/test_tools.py`、`tests/test_mcp_adapter.py` |
+| MCP/工具治理 | `trace.tool_results`、`/api/v1/admin/tools/audit`、`/api/v1/admin/tools/audit/summary` | `src/support_agent_lab/tools/registry.py`、`src/support_agent_lab/mcp/adapter.py` | `docs/mcp-tools.md`、`docs/tool-failure-playbook.md` | `tests/test_tools.py`、`tests/test_mcp_adapter.py` |
 | 多轮记忆 | `state.facts`、`/api/v1/admin/conversations/{id}/memory/replay` | `src/support_agent_lab/memory/store.py`、`src/support_agent_lab/memory/replay.py` | `docs/memory-playbook.md` | `examples/evals/memory_multiturn_regression.json` |
 | RAG/citation | `trace.retrieval`、`response.citations` | `src/support_agent_lab/memory/store.py` | `docs/retrieval-playbook.md` | `examples/evals/retrieval_challenge.json` |
 | 端到端 eval | `observed_*`、`failures` | `src/support_agent_lab/evals/runner.py` | `docs/evaluation-monitoring.md` | `examples/evals/*.json` |
@@ -1021,7 +1028,7 @@ git switch -c lab/failure-drill
 | 检索不全 | `trace.retrieval` 和 `python scripts/run_retrieval_eval.py` | tokenizer、query rewrite、chunk、hybrid search、rerank；把用户失败 query 加入 retrieval challenge |
 | 答案无引用 | `response.citations` | 强制 citation gate，不足时回答不确定或转人工 |
 | 重复建单 | SQLite `tool_idempotency` + `trace.tool_results` | 写工具必须带 idempotency key；相同 key 重启后也应 replay |
-| 工具审计核对 | `/api/v1/admin/tools/audit?trace_id=...` | 对照 trace 与 durable audit，检查 actor、request、错误码、延迟、幂等 hash 和 `replayed` |
+| 工具审计核对 | `/api/v1/admin/tools/audit?trace_id=...` 和 `/api/v1/admin/tools/audit/summary?...` | 对照 trace 与 durable audit，检查 actor、request、错误码、延迟、幂等 hash、`replayed` 和按工具聚合的失败率 |
 | 越权/隐私风险 | `policy_findings` 和 monitor event | scope、tenant check、字段脱敏、人工升级 |
 | 线上质量漂移 | `/api/v1/admin/monitor/summary?source=event_store` | 按 agent version、intent、failure type 聚合，并把真实失败样本沉淀回 monitor eval |
 
@@ -1036,7 +1043,7 @@ git switch -c lab/failure-drill
 | Monitor | 同进程 summary + SQLite event-store summary + append-only alert triage + monitor regression gate | Queue consumer + warehouse + alert manager/dashboard |
 | Policy | 规则引擎 + routing override | PII detector + RBAC + compliance workflow |
 | Event store | SQLite append-only event log + tool idempotency records | Postgres/Kafka event stream + durable outbox |
-| Tool audit | SQLite tool audit records + in-process recent audit_log + admin audit API | SIEM / warehouse / audit center |
+| Tool audit | SQLite tool audit records + in-process recent audit_log + admin audit/search/summary APIs | SIEM / warehouse / audit center |
 | API | FastAPI service | API service + worker service + autoscaling |
 
 Local API auth is intentionally lightweight: `X-Demo-User` and `X-Demo-Role` teach the boundary. Production mode uses a trusted gateway principal, requires `X-Internal-Auth`, and verifies HMAC-signed actor claims before trusting `X-Actor-*`.

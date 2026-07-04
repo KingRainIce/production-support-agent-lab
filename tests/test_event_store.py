@@ -10,11 +10,18 @@ from support_agent_lab.llm.gateway import create_default_llm_gateway
 from support_agent_lab.memory.event_store import SQLiteEventStore, StoredEvent
 from support_agent_lab.memory.replay import replay_conversation_memory
 from support_agent_lab.memory.store import ConversationMemory, KnowledgeIndex
-from support_agent_lab.models import MonitorAlertStatus, MonitorAlertTriageEvent, utc_now
+from support_agent_lab.models import MonitorAlertStatus, MonitorAlertTriageEvent, ToolStatus, utc_now
 from support_agent_lab.monitoring.monitor import OnlineMonitorAgent, summarize_monitor_events
 from support_agent_lab.tools.business_tools import create_registry
 from support_agent_lab.tools.errors import UPSTREAM_UNAVAILABLE, ToolError
-from support_agent_lab.tools.registry import Actor, ToolBroker, ToolContext, ToolDefinition, ToolRegistry
+from support_agent_lab.tools.registry import (
+    Actor,
+    ToolAuditRecord,
+    ToolBroker,
+    ToolContext,
+    ToolDefinition,
+    ToolRegistry,
+)
 
 
 @pytest.mark.asyncio
@@ -439,6 +446,136 @@ async def test_event_store_filters_tool_audit_records_by_operational_fields(tmp_
     assert all(record.created_at for record in by_actor_and_time)
     assert newest_first[0].error_code == "IDEMPOTENCY_CONFLICT"
     assert event_store.list_tool_audit_records(trace_id="missing_trace") == []
+
+
+def test_event_store_summarizes_tool_audit_records_by_tool_and_error(tmp_path):
+    event_store = SQLiteEventStore(tmp_path / "events.db")
+    rows = [
+        ToolAuditRecord(
+            id="audit_1",
+            tenant_id="demo_tenant",
+            actor_user_id="user_demo",
+            request_id="req_1",
+            trace_id="run_1",
+            tool_name="shipping.track",
+            argument_hash="hash_args_1",
+            status=ToolStatus.success,
+            latency_ms=120,
+            error_code=None,
+            idempotency_key_hash="hash_key_1",
+            replayed=False,
+            created_at="2026-07-04T00:00:00+00:00",
+        ),
+        ToolAuditRecord(
+            id="audit_2",
+            tenant_id="demo_tenant",
+            actor_user_id="user_demo",
+            request_id="req_2",
+            trace_id="run_2",
+            tool_name="shipping.track",
+            argument_hash="hash_args_2",
+            status=ToolStatus.failed,
+            latency_ms=400,
+            error_code="TIMEOUT",
+            idempotency_key_hash=None,
+            replayed=False,
+            created_at="2026-07-04T00:01:00+00:00",
+        ),
+        ToolAuditRecord(
+            id="audit_3",
+            tenant_id="demo_tenant",
+            actor_user_id="user_demo",
+            request_id="req_3",
+            trace_id="run_3",
+            tool_name="shipping.track",
+            argument_hash="hash_args_3",
+            status=ToolStatus.failed,
+            latency_ms=500,
+            error_code="TIMEOUT",
+            idempotency_key_hash=None,
+            replayed=False,
+            created_at="2026-07-04T00:02:00+00:00",
+        ),
+        ToolAuditRecord(
+            id="audit_4",
+            tenant_id="demo_tenant",
+            actor_user_id="user_admin",
+            request_id="req_4",
+            trace_id="run_4",
+            tool_name="order.get",
+            argument_hash="hash_args_4",
+            status=ToolStatus.failed,
+            latency_ms=200,
+            error_code="BAD_REQUEST",
+            idempotency_key_hash=None,
+            replayed=False,
+            created_at="2026-07-04T00:03:00+00:00",
+        ),
+        ToolAuditRecord(
+            id="audit_5",
+            tenant_id="demo_tenant",
+            actor_user_id="user_admin",
+            request_id="req_5",
+            trace_id="run_5",
+            tool_name="order.get",
+            argument_hash="hash_args_5",
+            status=ToolStatus.success,
+            latency_ms=100,
+            error_code=None,
+            idempotency_key_hash="hash_key_5",
+            replayed=True,
+            created_at="2026-07-04T00:04:00+00:00",
+        ),
+        ToolAuditRecord(
+            id="audit_other_tenant",
+            tenant_id="other_tenant",
+            actor_user_id="user_demo",
+            request_id="req_6",
+            trace_id="run_6",
+            tool_name="shipping.track",
+            argument_hash="secret_hash",
+            status=ToolStatus.failed,
+            latency_ms=9000,
+            error_code="SHOULD_NOT_COUNT",
+            idempotency_key_hash=None,
+            replayed=False,
+            created_at="2026-07-04T00:05:00+00:00",
+        ),
+    ]
+    for row in rows:
+        event_store.append_tool_audit(row)
+
+    summary = event_store.summarize_tool_audit_records(tenant_id="demo_tenant")
+    failed_only = event_store.summarize_tool_audit_records(
+        tenant_id="demo_tenant",
+        status="failed",
+    )
+    empty = event_store.summarize_tool_audit_records(
+        tenant_id="demo_tenant",
+        tool_name="missing.tool",
+    )
+
+    assert summary.total_calls == 5
+    assert summary.failed_calls == 3
+    assert summary.replayed_calls == 1
+    assert summary.failure_rate == 0.6
+    assert summary.average_latency_ms == 264.0
+    assert summary.max_latency_ms == 500
+    assert summary.window_start == "2026-07-04T00:00:00+00:00"
+    assert summary.window_end == "2026-07-04T00:04:00+00:00"
+    assert [item.error_code for item in summary.top_error_codes] == ["TIMEOUT", "BAD_REQUEST"]
+    assert [item.count for item in summary.top_error_codes] == [2, 1]
+    assert [tool.tool_name for tool in summary.tools] == ["shipping.track", "order.get"]
+    assert summary.tools[0].failed_calls == 2
+    assert summary.tools[0].failure_rate == 0.6667
+    assert summary.tools[0].top_error_code == "TIMEOUT"
+    assert summary.tools[1].replayed_calls == 1
+    assert failed_only.total_calls == 3
+    assert failed_only.average_latency_ms == 366.67
+    assert empty.total_calls == 0
+    assert empty.average_latency_ms is None
+    assert empty.max_latency_ms is None
+    assert empty.tools == []
 
 
 @pytest.mark.asyncio

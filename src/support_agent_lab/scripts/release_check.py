@@ -261,6 +261,22 @@ def run_production_smoke(
         )
         _require_json_status(audit, 200, "tool audit lookup")
 
+        audit_summary_path = f"/api/v1/admin/tools/audit/summary?trace_id={trace_id}"
+        audit_summary = client.get(
+            audit_summary_path,
+            headers=production_headers(
+                settings,
+                user_id=admin_user_id,
+                roles="admin",
+                scopes=ADMIN_SCOPES,
+                method="GET",
+                path=audit_summary_path,
+            ),
+        )
+        _require_json_status(audit_summary, 200, "tool audit summary lookup")
+        if audit_summary.json().get("total_calls", 0) <= 0:
+            raise RuntimeError("tool audit summary did not include persisted calls")
+
         incident_path = f"/api/v1/admin/incidents/runs/{trace_id}?include_memory=true"
         incident = client.get(
             incident_path,

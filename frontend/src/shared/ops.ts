@@ -1,4 +1,10 @@
-import type { AgentRunSearchResponse, ConsoleSnapshot, EvalReport, MonitorAlert } from "./types";
+import type {
+  AgentRunSearchResponse,
+  ConsoleSnapshot,
+  EvalReport,
+  MonitorAlert,
+  ToolAuditSummary
+} from "./types";
 
 export type AlertStatusFilter =
   | "active"
@@ -45,6 +51,16 @@ export type RunSearchStats = {
   humanReviewRuns: number;
   toolFailureRuns: number;
   averageDurationMs: number | null;
+};
+
+export type ToolAuditStats = {
+  totalCalls: number;
+  failedCalls: number;
+  replayedCalls: number;
+  failureRate: number;
+  averageLatencyMs: number | null;
+  worstToolName: string;
+  topErrorCode: string;
 };
 
 const SEVERITY_RANK: Record<string, number> = {
@@ -181,6 +197,27 @@ export function buildRunSearchStats(response: AgentRunSearchResponse | null): Ru
     averageDurationMs: durations.length
       ? Math.round(durations.reduce((sum, duration) => sum + duration, 0) / durations.length)
       : null
+  };
+}
+
+export function buildToolAuditStats(summary: ToolAuditSummary | null): ToolAuditStats {
+  const worstTool =
+    summary?.tools
+      .slice()
+      .sort(
+        (left, right) =>
+          right.failed_calls - left.failed_calls ||
+          right.total_calls - left.total_calls ||
+          left.tool_name.localeCompare(right.tool_name)
+      )[0] ?? null;
+  return {
+    totalCalls: summary?.total_calls ?? 0,
+    failedCalls: summary?.failed_calls ?? 0,
+    replayedCalls: summary?.replayed_calls ?? 0,
+    failureRate: summary?.failure_rate ?? 0,
+    averageLatencyMs: summary?.average_latency_ms ?? null,
+    worstToolName: worstTool?.tool_name ?? "none",
+    topErrorCode: summary?.top_error_codes[0]?.error_code ?? "none"
   };
 }
 

@@ -557,6 +557,58 @@ textarea:disabled {
   padding: 8px;
 }
 
+.tool-window-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.tool-summary-list {
+  display: grid;
+  gap: 7px;
+  margin-top: 12px;
+}
+
+.tool-summary-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 4px 8px;
+  width: 100%;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: white;
+  padding: 8px;
+  color: var(--ink);
+  text-align: left;
+}
+
+.tool-summary-row.has-failures {
+  border-left: 4px solid var(--orange);
+}
+
+.tool-summary-row span,
+.tool-summary-row small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tool-summary-row span {
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.tool-summary-row strong {
+  color: var(--green-800);
+  font-size: 12px;
+}
+
+.tool-summary-row small {
+  grid-column: 1 / -1;
+  color: var(--muted);
+  font-size: 11px;
+}
+
 .inline-error {
   margin-top: 10px;
   border: 1px solid #fecaca;
@@ -630,6 +682,16 @@ textarea:disabled {
 
 .run-result-meta {
   flex-wrap: wrap;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.tool-audit-card {
+  min-height: 136px;
+}
+
+.tool-audit-card .hash-line {
+  overflow-wrap: anywhere;
   color: var(--muted);
   font-size: 11px;
 }
@@ -1287,6 +1349,8 @@ textarea {
 }
 
 .field-label input {
+  width: 100%;
+  min-width: 0;
   min-height: 36px;
   border: 1px solid var(--line);
   border-radius: 7px;

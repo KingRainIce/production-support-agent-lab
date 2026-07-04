@@ -106,6 +106,39 @@ class ToolAuditRecord:
 
 
 @dataclass
+class ToolAuditErrorSummary:
+    error_code: str
+    count: int
+
+
+@dataclass
+class ToolAuditToolSummary:
+    tool_name: str
+    total_calls: int
+    failed_calls: int
+    replayed_calls: int
+    failure_rate: float
+    average_latency_ms: float | None
+    max_latency_ms: int | None
+    top_error_code: str | None
+    last_seen_at: str | None
+
+
+@dataclass
+class ToolAuditSummary:
+    total_calls: int
+    failed_calls: int
+    replayed_calls: int
+    failure_rate: float
+    average_latency_ms: float | None
+    max_latency_ms: int | None
+    window_start: str | None
+    window_end: str | None
+    top_error_codes: list[ToolAuditErrorSummary]
+    tools: list[ToolAuditToolSummary]
+
+
+@dataclass
 class IdempotencyDecision:
     status: Literal["reserved", "replay", "conflict", "in_progress"]
     result: ToolResult | None = None
