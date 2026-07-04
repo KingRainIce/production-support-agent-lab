@@ -306,6 +306,9 @@ APP_KNOWLEDGE_API_KEY=...
 APP_INTERNAL_API_KEY=...
 APP_ACTOR_SIGNATURE_SECRET=replace_with_real_actor_signature_secret_min_32_chars
 APP_REQUEST_SIGNATURE_REQUIRED=true
+APP_RATE_LIMIT_ENABLED=true
+APP_RATE_LIMIT_REQUESTS_PER_MINUTE=600
+APP_RATE_LIMIT_BURST=600
 APP_DATABASE_URL=sqlite:///./data/production/support-agent-lab.db
 ```
 

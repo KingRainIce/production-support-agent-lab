@@ -19,6 +19,9 @@ APP_INTERNAL_API_KEY=...
 APP_ACTOR_SIGNATURE_SECRET=replace_with_real_actor_signature_secret_min_32_chars
 APP_ACTOR_SIGNATURE_MAX_AGE_SECONDS=300
 APP_REQUEST_SIGNATURE_REQUIRED=true
+APP_RATE_LIMIT_ENABLED=true
+APP_RATE_LIMIT_REQUESTS_PER_MINUTE=600
+APP_RATE_LIMIT_BURST=600
 APP_HTTP_TIMEOUT_MS=5000
 APP_BUSINESS_API_RETRY_ATTEMPTS=2
 APP_BUSINESS_API_RETRY_BACKOFF_MS=100
@@ -105,6 +108,22 @@ When `APP_REQUEST_SIGNATURE_REQUIRED=true`, or when it is unset and `APP_REQUIRE
 This is a deployable baseline for a trusted internal gateway. Higher-risk deployments should also add mTLS/JWT at the gateway boundary and central nonce storage across all replicas.
 
 This HMAC protects the Agent API ingress boundary. It is not a replacement for tenant/resource authorization inside the business service. `ToolBroker` enforces business tool scopes before every tool call, and your business API must still enforce tenant/resource ownership.
+
+## Rate limiting
+
+Production enables an in-process token-bucket limiter by default unless `APP_RATE_LIMIT_ENABLED=false` is explicitly set. When `APP_REQUIRE_PRODUCTION=true`, explicitly disabling it fails startup. The limiter keys by tenant, actor user id, and endpoint family (`chat`, `admin`, `admin-evals`, or `api`). Health and readiness endpoints are exempt.
+
+Tune:
+
+```text
+APP_RATE_LIMIT_ENABLED=true
+APP_RATE_LIMIT_REQUESTS_PER_MINUTE=600
+APP_RATE_LIMIT_BURST=600
+```
+
+Limited requests return `429` with `Retry-After`, `X-RateLimit-Limit`, and `X-RateLimit-Remaining`. Successful limited requests also include `X-RateLimit-Limit` and `X-RateLimit-Remaining` so a gateway or frontend can surface pressure before hard failure.
+
+This built-in limiter is intentionally single-instance, matching the current SQLite production baseline. For multi-replica production, move the token bucket state to Redis or your API gateway and keep the same key dimensions: tenant id, actor user id, and endpoint family.
 
 Use the bundled signer to generate headers for production smoke tests:
 
@@ -342,6 +361,7 @@ curl "http://127.0.0.1:8000/api/v1/ready?deep=false"
 - `APP_INTERNAL_API_KEY`
 - `APP_ACTOR_SIGNATURE_SECRET` with at least 32 characters
 - `APP_REQUEST_SIGNATURE_REQUIRED=true`; it is implied when `APP_REQUIRE_PRODUCTION=true` and the field is unset, and startup fails if it is explicitly set to `false`
+- `APP_RATE_LIMIT_ENABLED=true`; it is implied in production when unset, and startup fails if it is explicitly set to `false` while `APP_REQUIRE_PRODUCTION=true`
 - `APP_DATABASE_URL=sqlite:///...` until another event-store adapter is implemented
 
 Business API resilience knobs are optional but should be set deliberately for each environment:

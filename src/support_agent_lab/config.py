@@ -22,6 +22,9 @@ class Settings(BaseSettings):
     app_actor_signature_secret: str | None = None
     app_actor_signature_max_age_seconds: int = Field(default=300, ge=30, le=3600)
     app_request_signature_required: bool | None = None
+    app_rate_limit_enabled: bool | None = None
+    app_rate_limit_requests_per_minute: int = Field(default=600, ge=1, le=60000)
+    app_rate_limit_burst: int = Field(default=600, ge=1, le=60000)
     app_http_timeout_ms: int = Field(default=5000, ge=500, le=60000)
     app_business_api_retry_attempts: int = Field(default=2, ge=1, le=5)
     app_business_api_retry_backoff_ms: int = Field(default=100, ge=0, le=5000)
@@ -89,6 +92,8 @@ class Settings(BaseSettings):
             missing.append("APP_ACTOR_SIGNATURE_SECRET must be at least 32 characters")
         if self.app_require_production and self.app_request_signature_required is False:
             missing.append("APP_REQUEST_SIGNATURE_REQUIRED must not be false when APP_REQUIRE_PRODUCTION=true")
+        if self.app_require_production and self.app_rate_limit_enabled is False:
+            missing.append("APP_RATE_LIMIT_ENABLED must not be false when APP_REQUIRE_PRODUCTION=true")
         if self.app_monitor_alert_webhook_enabled:
             if not self.app_monitor_alert_webhook_url:
                 missing.append("APP_MONITOR_ALERT_WEBHOOK_URL")
@@ -109,6 +114,12 @@ class Settings(BaseSettings):
         if self.app_request_signature_required is not None:
             return self.app_request_signature_required
         return self.is_production and self.app_require_production
+
+    @property
+    def rate_limit_enabled(self) -> bool:
+        if self.app_rate_limit_enabled is not None:
+            return self.app_rate_limit_enabled
+        return self.is_production
 
     def _looks_like_placeholder(self, value: str | None) -> bool:
         if not value:

@@ -28,6 +28,7 @@ from support_agent_lab.api.request_signature import (
     reserve_request_nonce,
     verify_request_signature,
 )
+from support_agent_lab.api.rate_limit import InMemoryRateLimiter, rate_limit_key, should_rate_limit
 from support_agent_lab.evals.suites import STAGING_EVAL_SUITES
 from support_agent_lab.memory.event_store import StoredEvent
 from support_agent_lab.memory.knowledge_call import call_knowledge_search
@@ -1721,6 +1722,7 @@ def create_app() -> FastAPI:
         version="0.1.0",
         description="A production-shaped customer support agent for learning agent engineering.",
     )
+    app.state.rate_limiter = InMemoryRateLimiter()
 
     @app.middleware("http")
     async def production_request_signature_middleware(request: Request, call_next):
@@ -1732,7 +1734,31 @@ def create_app() -> FastAPI:
                 reserve_request_nonce(settings, verified)
             except RequestSignatureError as exc:
                 return JSONResponse(status_code=401, content={"detail": str(exc)})
-        return await call_next(request)
+        rate_decision = None
+        if should_rate_limit(settings, request.url.path):
+            rate_decision = app.state.rate_limiter.check(
+                rate_limit_key(settings, request),
+                requests_per_minute=settings.app_rate_limit_requests_per_minute,
+                burst=settings.app_rate_limit_burst,
+            )
+            if not rate_decision.allowed:
+                return JSONResponse(
+                    status_code=429,
+                    content={
+                        "detail": "Rate limit exceeded",
+                        "retry_after_seconds": rate_decision.retry_after_seconds,
+                    },
+                    headers={
+                        "Retry-After": str(rate_decision.retry_after_seconds),
+                        "X-RateLimit-Limit": str(rate_decision.limit),
+                        "X-RateLimit-Remaining": "0",
+                    },
+                )
+        response = await call_next(request)
+        if rate_decision:
+            response.headers["X-RateLimit-Limit"] = str(rate_decision.limit)
+            response.headers["X-RateLimit-Remaining"] = str(rate_decision.remaining)
+        return response
 
     @app.get("/api/v1/health")
     def health() -> dict[str, str]:

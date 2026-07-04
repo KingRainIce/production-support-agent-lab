@@ -118,6 +118,11 @@ def _signed_request_headers(
     return headers
 
 
+def _reset_rate_limit_state() -> None:
+    get_settings.cache_clear()
+    app.state.rate_limiter.reset()
+
+
 class _RecordingKnowledge:
     def __init__(self) -> None:
         self.calls: list[tuple[str, int]] = []
@@ -403,6 +408,64 @@ def test_production_actor_rejects_malformed_or_future_timestamp():
         assert "expired" in exc.detail
     else:  # pragma: no cover
         raise AssertionError("future actor signature should fail closed outside clock skew")
+
+
+def test_rate_limit_can_throttle_chat_session_creation(monkeypatch):
+    monkeypatch.setenv("APP_RATE_LIMIT_ENABLED", "true")
+    monkeypatch.setenv("APP_RATE_LIMIT_REQUESTS_PER_MINUTE", "1")
+    monkeypatch.setenv("APP_RATE_LIMIT_BURST", "1")
+    _reset_rate_limit_state()
+    try:
+        client = TestClient(app)
+        first = client.post("/api/v1/chat/sessions", json={})
+        second = client.post("/api/v1/chat/sessions", json={})
+    finally:
+        _reset_rate_limit_state()
+
+    assert first.status_code == 200
+    assert first.headers["X-RateLimit-Limit"] == "1"
+    assert first.headers["X-RateLimit-Remaining"] == "0"
+    assert second.status_code == 429
+    assert second.json()["detail"] == "Rate limit exceeded"
+    assert second.json()["retry_after_seconds"] >= 1
+    assert second.headers["Retry-After"] == str(second.json()["retry_after_seconds"])
+
+
+def test_rate_limit_is_scoped_by_actor(monkeypatch):
+    monkeypatch.setenv("APP_RATE_LIMIT_ENABLED", "true")
+    monkeypatch.setenv("APP_RATE_LIMIT_REQUESTS_PER_MINUTE", "1")
+    monkeypatch.setenv("APP_RATE_LIMIT_BURST", "1")
+    _reset_rate_limit_state()
+    try:
+        client = TestClient(app)
+        demo_first = client.post("/api/v1/chat/sessions", json={}, headers={"X-Demo-User": "user_demo"})
+        demo_second = client.post("/api/v1/chat/sessions", json={}, headers={"X-Demo-User": "user_demo"})
+        guest_first = client.post("/api/v1/chat/sessions", json={}, headers={"X-Demo-User": "user_guest"})
+    finally:
+        _reset_rate_limit_state()
+
+    assert demo_first.status_code == 200
+    assert demo_second.status_code == 429
+    assert guest_first.status_code == 200
+
+
+def test_rate_limit_skips_health_and_ready(monkeypatch):
+    monkeypatch.setenv("APP_RATE_LIMIT_ENABLED", "true")
+    monkeypatch.setenv("APP_RATE_LIMIT_REQUESTS_PER_MINUTE", "1")
+    monkeypatch.setenv("APP_RATE_LIMIT_BURST", "1")
+    _reset_rate_limit_state()
+    try:
+        client = TestClient(app)
+        health_one = client.get("/api/v1/health")
+        health_two = client.get("/api/v1/health")
+        ready = client.get("/api/v1/ready")
+    finally:
+        _reset_rate_limit_state()
+
+    assert health_one.status_code == 200
+    assert health_two.status_code == 200
+    assert ready.status_code == 200
+    assert "X-RateLimit-Limit" not in health_one.headers
 
 
 def test_local_demo_admin_gets_management_scopes_but_user_does_not():

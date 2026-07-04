@@ -103,6 +103,26 @@ def test_require_production_rejects_disabled_request_signature():
         settings.validate_production_ready()
 
 
+def test_require_production_rejects_disabled_rate_limit():
+    settings = Settings(
+        app_env="production",
+        app_tenant_id="tenant_live",
+        app_require_production=True,
+        app_model_provider="openai",
+        openai_api_key="sk-test",
+        app_business_api_base_url="https://business.internal.test",
+        app_business_api_key="business-token",
+        app_knowledge_api_base_url="https://knowledge.internal.test",
+        app_knowledge_api_key="knowledge-token",
+        app_internal_api_key="internal-test-key",
+        app_actor_signature_secret=ACTOR_SIGNATURE_SECRET,
+        app_rate_limit_enabled=False,
+    )
+
+    with pytest.raises(RuntimeError, match="APP_RATE_LIMIT_ENABLED"):
+        settings.validate_production_ready()
+
+
 def test_production_mode_rejects_demo_tenant():
     settings = Settings(
         app_env="production",
