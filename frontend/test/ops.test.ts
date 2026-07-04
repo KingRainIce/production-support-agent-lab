@@ -7,6 +7,7 @@ import {
   buildMonitorDrilldownStats,
   buildMonitorTriageHealthStats,
   buildOpsMetrics,
+  buildPromotionGateStats,
   buildRunSearchStats,
   buildToolAuditStats,
   canCloseAlertDelivery,
@@ -824,6 +825,63 @@ describe("ops workbench helpers", () => {
       title: "1/1 sent",
       sentCount: 1
     });
+  });
+
+  it("summarizes promotion gate checks for release preflight", () => {
+    expect(buildPromotionGateStats(null)).toMatchObject({
+      status: "unknown",
+      tone: "neutral",
+      blockedCount: 0
+    });
+
+    const stats = buildPromotionGateStats({
+      status: "blocked",
+      generated_at: "2026-07-04T00:06:00.000Z",
+      environment: "staging",
+      source: "event_store",
+      window_hours: 24,
+      thresholds: {
+        max_active_p0p1_alerts: 0,
+        max_active_alerts: 10,
+        max_tool_failure_rate: 0.05,
+        max_eval_age_hours: 24,
+        min_tool_calls: 1
+      },
+      checks: [
+        { name: "readiness", status: "passed", detail: "Ready.", evidence: {} },
+        { name: "monitor", status: "warn", detail: "Active alerts.", evidence: { active: 1 } },
+        { name: "eval", status: "blocked", detail: "Latest eval failed.", evidence: { score: 0.5 } }
+      ],
+      readiness: {
+        status: "ok",
+        environment: "staging",
+        deep: true,
+        checks: []
+      },
+      monitor: triageMetrics(),
+      tool_audit: {
+        total_calls: 1,
+        failed_calls: 0,
+        replayed_calls: 0,
+        failure_rate: 0,
+        average_latency_ms: 42,
+        max_latency_ms: 42,
+        window_start: "2026-07-04T00:00:00.000Z",
+        window_end: "2026-07-04T00:01:00.000Z",
+        top_error_codes: [],
+        tools: []
+      },
+      latest_eval_gate: null
+    });
+
+    expect(stats).toMatchObject({
+      status: "blocked",
+      tone: "danger",
+      blockedCount: 1,
+      warnCount: 1,
+      passedCount: 1
+    });
+    expect(stats.detail).toContain("1 blocked");
   });
 });
 

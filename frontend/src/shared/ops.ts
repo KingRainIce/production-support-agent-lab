@@ -9,6 +9,7 @@ import type {
   MonitorAlertDeliverySummary,
   AlertDeliveryRecord,
   MonitorDrilldownResponse,
+  PromotionGateResponse,
   MonitorTriageMetricsResponse,
   ToolAuditSummary
 } from "./types";
@@ -131,6 +132,16 @@ export type AlertDispatchResultStats = {
   sentCount: number;
   failedCount: number;
   deadCount: number;
+};
+
+export type PromotionGateStats = {
+  status: PromotionGateResponse["status"] | "unknown";
+  tone: Tone;
+  value: string;
+  detail: string;
+  passedCount: number;
+  warnCount: number;
+  blockedCount: number;
 };
 
 const SEVERITY_RANK: Record<string, number> = {
@@ -530,6 +541,37 @@ export function buildAlertDispatchResultStats(
     tone: "success",
     title: "No due deliveries",
     detail: "No active P0/P1 delivery rows were due."
+  };
+}
+
+export function buildPromotionGateStats(gate: PromotionGateResponse | null): PromotionGateStats {
+  if (!gate) {
+    return {
+      status: "unknown",
+      tone: "neutral",
+      value: "unknown",
+      detail: "Promotion gate unavailable.",
+      passedCount: 0,
+      warnCount: 0,
+      blockedCount: 0
+    };
+  }
+  const passedCount = gate.checks.filter((check) => check.status === "passed").length;
+  const warnCount = gate.checks.filter((check) => check.status === "warn").length;
+  const blockedCount = gate.checks.filter((check) => check.status === "blocked").length;
+  const tone: Tone = gate.status === "blocked" ? "danger" : gate.status === "warn" ? "warn" : "success";
+  const detail =
+    gate.status === "passed"
+      ? `${passedCount} checks passed over ${gate.window_hours}h.`
+      : `${blockedCount} blocked, ${warnCount} warning, ${passedCount} passed.`;
+  return {
+    status: gate.status,
+    tone,
+    value: gate.status,
+    detail,
+    passedCount,
+    warnCount,
+    blockedCount
   };
 }
 

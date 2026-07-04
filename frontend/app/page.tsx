@@ -43,6 +43,7 @@ import {
   buildMonitorDrilldownStats,
   buildMonitorTriageHealthStats,
   buildOpsMetrics,
+  buildPromotionGateStats,
   buildRunSearchStats,
   buildToolAuditStats,
   deliveryStatusTone,
@@ -86,6 +87,7 @@ import type {
   MonitorDrilldownResponse,
   MonitorEvent,
   PolicyFinding,
+  PromotionGateResponse,
   RegressionDraftResponse,
   RetrievalHit,
   RetrievalTrace,
@@ -1241,6 +1243,7 @@ export default function Home() {
               backupLabel={eventBackupLabel}
               backupReport={eventBackupReport}
               retentionReport={eventRetentionReport}
+              promotionGate={snapshot?.promotionGate ?? null}
               busy={eventOpsBusy}
               error={eventOpsError}
               eventRetentionDays={eventRetentionDays}
@@ -2129,6 +2132,7 @@ function SettingsWorkbenchPanel({
   backupLabel,
   backupReport,
   retentionReport,
+  promotionGate,
   busy,
   error,
   eventRetentionDays,
@@ -2153,6 +2157,7 @@ function SettingsWorkbenchPanel({
   backupLabel: string;
   backupReport: SQLiteBackupReport | null;
   retentionReport: EventStoreRetentionReport | null;
+  promotionGate: PromotionGateResponse | null;
   busy: string | null;
   error: string | null;
   eventRetentionDays: string;
@@ -2178,6 +2183,7 @@ function SettingsWorkbenchPanel({
   const previewBusy = busy === "retention-preview";
   const applyBusy = busy === "retention-apply";
   const canApply = backupReport?.verified === true && previewReady && applyConfirmed;
+  const promotionStats = buildPromotionGateStats(promotionGate);
   return (
     <aside className="alerts-panel run-workbench settings-workbench">
       <div className="panel-heading">
@@ -2186,6 +2192,54 @@ function SettingsWorkbenchPanel({
           <strong>Event Store Operations</strong>
         </div>
       </div>
+
+      <section className={`settings-section release-preflight state-${promotionStats.tone}`}>
+        <div className="settings-section-head">
+          <strong>Release Preflight</strong>
+          <Badge tone={promotionStats.tone}>{promotionStats.value}</Badge>
+        </div>
+        <div className="run-search-stats event-op-stats">
+          <Metric label="Blocked" value={String(promotionStats.blockedCount)} />
+          <Metric label="Warnings" value={String(promotionStats.warnCount)} />
+          <Metric label="Passed" value={String(promotionStats.passedCount)} />
+          <Metric label="Window" value={promotionGate ? `${promotionGate.window_hours}h` : "n/a"} />
+        </div>
+        {promotionGate ? (
+          <>
+            <div className="preflight-meta">
+              <span>{promotionStats.detail}</span>
+              <span>{promotionGate.environment}</span>
+              <span>{promotionGate.source}</span>
+              <span>{formatTime(promotionGate.generated_at)}</span>
+            </div>
+            <div className="preflight-check-list">
+              {promotionGate.checks.map((check) => (
+                <div className={`preflight-check-row state-${check.status}`} key={check.name}>
+                  <div>
+                    <strong>{check.name}</strong>
+                    <span>{check.detail}</span>
+                  </div>
+                  <Badge tone={promotionGateBadgeTone(check.status)}>{check.status}</Badge>
+                  {Object.entries(check.evidence).length ? (
+                    <div className="preflight-evidence">
+                      {Object.entries(check.evidence)
+                        .slice(0, 4)
+                        .map(([key, value]) => (
+                          <span key={key}>
+                            <b>{key}</b>
+                            {stringifyValue(value as JsonValue)}
+                          </span>
+                        ))}
+                    </div>
+                  ) : null}
+                </div>
+              ))}
+            </div>
+          </>
+        ) : (
+          <PanelEmpty title="Preflight unavailable" detail="Check admin scopes or the Agent API connection." />
+        )}
+      </section>
 
       <section className="settings-section">
         <div className="settings-section-head">

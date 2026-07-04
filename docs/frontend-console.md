@@ -142,10 +142,12 @@ machine.
   sends operator queries through the BFF, returns snippets instead of full
   document bodies, and exposes rewrite queries, stage counts, selected sources,
   dropped candidates, and top-score signals for recall debugging.
-- Settings workbench for event-store operations. It creates verified backups
-  through a label-only BFF call, previews retention, and only enables apply
-  after a verified backup, a dry-run report, and operator confirmation. The
-  browser never sends filesystem paths to the backend.
+- Settings workbench for release and event-store operations. It expands the
+  read-only promotion gate into per-check readiness, monitor, tool-audit, and
+  eval evidence; it also creates verified backups through a label-only BFF
+  call, previews retention, and only enables apply after a verified backup, a
+  dry-run report, and operator confirmation. The browser never sends filesystem
+  paths to the backend.
 - Queue workbench controls for severity, status, search, new-event filtering,
   and severity/newest/count sorting.
 - Shareable investigation URLs for `runId`, `alertKey`, active workspace,
@@ -214,6 +216,8 @@ memory, safety, monitoring, and incident response.
 14. Run the eval gate in local/staging before promoting prompt, routing, tool, or
    policy changes. Check the persisted history row so the reviewer can see who
    ran it, when, against which run/alert context, and whether any cases failed.
-15. Use `Settings` before manual cleanup: create a verified backup, preview
+15. Use `Settings` before release: inspect `Release Preflight` and do not
+   promote while readiness, monitor, tool-audit, or eval checks are blocked.
+16. Use `Settings` before manual cleanup: create a verified backup, preview
    retention, then apply only after reviewing the table-level candidate counts.
-16. Resolve only after the triage note explains customer impact and mitigation.
+17. Resolve only after the triage note explains customer impact and mitigation.
