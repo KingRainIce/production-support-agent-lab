@@ -47,18 +47,19 @@ real local FastAPI endpoints:
 1. `POST /api/v1/chat/sessions`
 2. `POST /api/v1/chat/messages`
 3. `GET /api/v1/admin/monitor/summary?source=event_store`
-4. `GET /api/v1/admin/incidents/runs/{run_id}?include_memory=true`
-5. `GET /api/v1/admin/runs` when the `Runs` workbench searches persisted
+4. `GET /api/v1/admin/monitor/triage/metrics?source=event_store`
+5. `GET /api/v1/admin/incidents/runs/{run_id}?include_memory=true`
+6. `GET /api/v1/admin/runs` when the `Runs` workbench searches persisted
    history.
-6. `GET /api/v1/admin/tools/audit` and
+7. `GET /api/v1/admin/tools/audit` and
    `GET /api/v1/admin/tools/audit/summary` when the `Tools` workbench searches
    persisted tool calls and SLA/failure aggregates.
-7. `POST /api/v1/admin/knowledge/search` when the `Knowledge` workbench runs
+8. `POST /api/v1/admin/knowledge/search` when the `Knowledge` workbench runs
    a retrieval diagnostic query.
-8. `GET /api/v1/admin/monitor/drilldown` when the `Alerts` workbench switches
+9. `GET /api/v1/admin/monitor/drilldown` when the `Alerts` workbench switches
    from queue triage to event-level investigation by alert key, intent, risk,
    failure type, grounding, policy status, and human-review state.
-9. `POST /api/v1/admin/evals/regression-drafts` when an operator turns a
+10. `POST /api/v1/admin/evals/regression-drafts` when an operator turns a
    selected monitor event into a copyable eval-case draft.
 
 ## Production Run
@@ -91,6 +92,9 @@ The backend listens on `8000`; the console listens on `3000`.
 ## What The Console Shows
 
 - Monitor alert queue from `MonitorSummary`.
+- Triage health from persisted monitor and triage events. The strip shows active
+  alerts, unassigned active alerts, new events since the latest triage action,
+  stale active alerts, P0/P1 pressure, oldest active alert age, and MTTA.
 - Monitor drilldown from persisted `monitor.reviewed` events. It reuses the
   alert queue context, shows backend bucket aggregates, and opens a sampled
   run through the same trace/evidence panel. For the selected event, it can
@@ -130,24 +134,27 @@ memory, safety, monitoring, and incident response.
 ## Operator Workflow
 
 1. Start in the alert queue and keep the default `Active` status filter on.
-2. Switch the `Alerts` workbench to `Drilldown` when you need to inspect the
+2. Read the `Triage Health` strip before opening a single incident. `New` means
+   an alert had fresh monitor events after the latest operator action; do not
+   resolve it until the new sample is checked.
+3. Switch the `Alerts` workbench to `Drilldown` when you need to inspect the
    actual monitor events behind an alert, compare failure buckets, or open a
    sampled run from the event list.
-3. Switch to `Runs` when you need historical investigation across users,
+4. Switch to `Runs` when you need historical investigation across users,
    conversations, routes, or tool error codes.
-4. Switch to `Tools` when the problem is a timeout, upstream error, replay, or
+5. Switch to `Tools` when the problem is a timeout, upstream error, replay, or
    suspected idempotency issue; open any audit row to hydrate its full run.
-5. Switch to `Knowledge` when the answer has weak citations, missing grounding,
+6. Switch to `Knowledge` when the answer has weak citations, missing grounding,
    or a suspected recall/rerank/query-rewrite issue.
-6. Use alert search to find a run, owner, alert reason, or event id.
-7. Assign the alert before investigation so ownership is explicit.
-8. Open `Brief` first for the operator summary and recommended next actions.
-9. Drill into `Citations`, `Tool Audit`, and `Memory` only when the brief points
+7. Use alert search to find a run, owner, alert reason, or event id.
+8. Assign the alert before investigation so ownership is explicit.
+9. Open `Brief` first for the operator summary and recommended next actions.
+10. Drill into `Citations`, `Tool Audit`, and `Memory` only when the brief points
    at missing grounding, tool failures, or replay questions.
-10. In `Drilldown`, select the monitor event and use `Draft eval` to preview a
+11. In `Drilldown`, select the monitor event and use `Draft eval` to preview a
    regression case. The backend chooses the closest file, such as
    `security_regression.json` or `tool_failure_regression.json`, and validates
    the draft against the strict eval schema.
-11. Run the eval gate in local/staging before promoting prompt, routing, tool, or
+12. Run the eval gate in local/staging before promoting prompt, routing, tool, or
    policy changes.
-12. Resolve only after the triage note explains customer impact and mitigation.
+13. Resolve only after the triage note explains customer impact and mitigation.

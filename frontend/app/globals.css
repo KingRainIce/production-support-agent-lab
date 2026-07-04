@@ -527,6 +527,87 @@ textarea:disabled {
   background: #fbfcfb;
 }
 
+.triage-health-strip {
+  display: grid;
+  gap: 9px;
+  margin-top: 12px;
+  border: 1px solid var(--line);
+  border-left: 4px solid var(--green-700);
+  border-radius: 8px;
+  background: white;
+  padding: 10px;
+}
+
+.triage-health-strip.state-degraded {
+  border-left-color: var(--orange);
+}
+
+.triage-health-strip.state-critical {
+  border-left-color: var(--red);
+}
+
+.triage-health-strip.state-unknown {
+  border-left-color: #94a3b8;
+}
+
+.triage-health-head,
+.triage-health-head span,
+.triage-health-meta {
+  display: flex;
+  align-items: center;
+}
+
+.triage-health-head {
+  justify-content: space-between;
+  gap: 8px;
+  min-width: 0;
+}
+
+.triage-health-head span {
+  gap: 6px;
+  min-width: 0;
+  color: #243832;
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.triage-health-head svg {
+  flex: 0 0 auto;
+  color: var(--green-800);
+}
+
+.triage-health-stats {
+  margin-top: 0;
+}
+
+.triage-health-stats .metric {
+  min-width: 0;
+  padding: 7px;
+}
+
+.triage-health-stats .metric span,
+.triage-health-stats .metric strong,
+.triage-health-meta span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.triage-health-stats .metric strong {
+  font-size: 13px;
+}
+
+.triage-health-meta {
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.triage-health-meta span {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 700;
+}
+
 .workbench-switch {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));

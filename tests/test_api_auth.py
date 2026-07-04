@@ -1,5 +1,6 @@
 import time
 import json
+from datetime import timedelta
 
 from fastapi.testclient import TestClient
 from fastapi import HTTPException
@@ -8,7 +9,18 @@ from support_agent_lab.api.auth import get_request_actor, _get_production_actor
 from support_agent_lab.api.main import app, get_container
 from support_agent_lab.bootstrap import create_container
 from support_agent_lab.config import get_settings
-from support_agent_lab.models import EvalCase, IntentType, MonitorEvent, RetrievalHit, RetrievalTrace, RiskLevel
+from support_agent_lab.models import (
+    EvalCase,
+    IntentType,
+    MonitorAlertStatus,
+    MonitorAlertTriageEvent,
+    MonitorEvent,
+    RetrievalHit,
+    RetrievalTrace,
+    RiskLevel,
+    utc_now,
+)
+from support_agent_lab.monitoring.monitor import monitor_alert_key
 from support_agent_lab.security.actor_signature import build_signed_request_headers, sign_actor_claims
 
 
@@ -428,6 +440,16 @@ def test_production_monitor_admin_requires_explicit_monitor_scopes(tmp_path, mon
             headers=_production_headers(scopes="monitor:read"),
             params={"source": "event_store"},
         )
+        missing_metrics = client.get(
+            "/api/v1/admin/monitor/triage/metrics",
+            headers=_production_headers(scopes="crm:read"),
+            params={"source": "event_store"},
+        )
+        metrics_allowed = client.get(
+            "/api/v1/admin/monitor/triage/metrics",
+            headers=_production_headers(scopes="monitor:read"),
+            params={"source": "event_store"},
+        )
         alert_key = read_allowed.json()["alerts"][0]["key"]
         missing_write = client.post(
             f"/api/v1/admin/monitor/alerts/{alert_key}/triage",
@@ -450,6 +472,10 @@ def test_production_monitor_admin_requires_explicit_monitor_scopes(tmp_path, mon
     assert missing_drilldown.json()["detail"] == "Missing required scope: monitor:read"
     assert drilldown_allowed.status_code == 200
     assert drilldown_allowed.json()["stats"]["matching_events"] == 1
+    assert missing_metrics.status_code == 403
+    assert missing_metrics.json()["detail"] == "Missing required scope: monitor:read"
+    assert metrics_allowed.status_code == 200
+    assert metrics_allowed.json()["alert_count"] == 1
     assert missing_write.status_code == 403
     assert missing_write.json()["detail"] == "Missing required scope: monitor:write"
     assert write_allowed.status_code == 200
@@ -1421,6 +1447,174 @@ def test_admin_can_append_monitor_alert_triage_without_mutating_reviewed_event(t
     assert updated_alert["status"] == "acknowledged"
     assert updated_alert["assignee_user_id"] == "backend-oncall"
     assert updated_alert["last_triage_event_id"] == triage_body["id"]
+
+
+def test_monitor_triage_metrics_are_healthy_for_empty_windows(tmp_path, monkeypatch):
+    monkeypatch.setenv("APP_DATABASE_URL", f"sqlite:///{tmp_path / 'events.db'}")
+    get_settings.cache_clear()
+    app_container = create_container()
+    app.dependency_overrides[get_container] = lambda: app_container
+    try:
+        client = TestClient(app)
+        response = client.get(
+            "/api/v1/admin/monitor/triage/metrics",
+            headers={"X-Demo-Role": "admin"},
+            params={"source": "event_store"},
+        )
+    finally:
+        app.dependency_overrides.clear()
+        get_settings.cache_clear()
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["source"] == "event_store"
+    assert body["total_events"] == 0
+    assert body["alert_count"] == 0
+    assert body["active_alert_count"] == 0
+    assert body["grounded_rate"] == 1.0
+    assert body["policy_compliance_rate"] == 1.0
+    assert body["human_review_rate"] == 0.0
+    assert body["health_status"] == "ok"
+    assert body["by_status"] == {
+        "open": 0,
+        "acknowledged": 0,
+        "investigating": 0,
+        "resolved": 0,
+        "silenced": 0,
+    }
+
+
+def test_monitor_triage_metrics_apply_ack_assignment_and_new_events(tmp_path, monkeypatch):
+    monkeypatch.setenv("APP_DATABASE_URL", f"sqlite:///{tmp_path / 'events.db'}")
+    get_settings.cache_clear()
+    app_container = create_container()
+    app.dependency_overrides[get_container] = lambda: app_container
+    first_seen = utc_now() - timedelta(minutes=10)
+    first_event = MonitorEvent(
+        conversation_id="conv_metrics_1",
+        run_id="run_metrics_1",
+        timestamp=first_seen,
+        agent_version="agent_test",
+        user_intent=IntentType.order_status,
+        risk_level=RiskLevel.medium,
+        grounded=True,
+        policy_compliant=True,
+        needs_human_review=True,
+        failure_types=["TIMEOUT"],
+        summary="shipping timeout",
+    )
+    second_event = first_event.model_copy(
+        update={
+            "id": "mon_metrics_2",
+            "conversation_id": "conv_metrics_2",
+            "run_id": "run_metrics_2",
+            "timestamp": first_seen + timedelta(minutes=5),
+        }
+    )
+    alert_key = monitor_alert_key(first_event)
+    app_container.event_store.append_monitor_event(
+        first_event,
+        tenant_id=app_container.settings.app_tenant_id,
+    )
+    app_container.event_store.append_monitor_event(
+        second_event,
+        tenant_id=app_container.settings.app_tenant_id,
+    )
+    app_container.event_store.append_monitor_alert_triage(
+        MonitorAlertTriageEvent(
+            alert_key=alert_key,
+            status=MonitorAlertStatus.acknowledged,
+            assignee_user_id="backend-oncall",
+            actor_user_id="user_demo",
+            note="ack before follow-up timeout",
+            created_at=first_seen + timedelta(minutes=1),
+        ),
+        tenant_id=app_container.settings.app_tenant_id,
+    )
+    try:
+        client = TestClient(app)
+        response = client.get(
+            "/api/v1/admin/monitor/triage/metrics",
+            headers={"X-Demo-Role": "admin"},
+            params={"source": "event_store", "order": "asc"},
+        )
+    finally:
+        app.dependency_overrides.clear()
+        get_settings.cache_clear()
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["total_events"] == 2
+    assert body["healthy_events"] == 0
+    assert body["alerted_events"] == 2
+    assert body["by_alert_failure_type"]["TIMEOUT"] == 2
+    assert body["alert_count"] == 1
+    assert body["active_alert_count"] == 1
+    assert body["assigned_alert_count"] == 1
+    assert body["unassigned_active_alert_count"] == 0
+    assert body["untriaged_alert_count"] == 0
+    assert body["new_events_since_triage_count"] == 1
+    assert body["by_status"]["acknowledged"] == 1
+    assert body["by_severity"]["P2"] == 1
+    assert body["worst_active_severity"] == "P2"
+    assert body["health_status"] == "degraded"
+    assert body["mtta_seconds"] == 60
+    assert body["mttr_seconds"] is None
+
+
+def test_monitor_triage_metrics_track_resolution_time(tmp_path, monkeypatch):
+    monkeypatch.setenv("APP_DATABASE_URL", f"sqlite:///{tmp_path / 'events.db'}")
+    get_settings.cache_clear()
+    app_container = create_container()
+    app.dependency_overrides[get_container] = lambda: app_container
+    first_seen = utc_now() - timedelta(minutes=6)
+    event = MonitorEvent(
+        conversation_id="conv_metrics_resolved",
+        run_id="run_metrics_resolved",
+        timestamp=first_seen,
+        agent_version="agent_test",
+        user_intent=IntentType.refund_or_return,
+        risk_level=RiskLevel.high,
+        grounded=True,
+        policy_compliant=False,
+        needs_human_review=True,
+        failure_types=["POLICY_ESCALATION"],
+        summary="refund policy escalation",
+    )
+    alert_key = monitor_alert_key(event)
+    app_container.event_store.append_monitor_event(
+        event,
+        tenant_id=app_container.settings.app_tenant_id,
+    )
+    app_container.event_store.append_monitor_alert_triage(
+        MonitorAlertTriageEvent(
+            alert_key=alert_key,
+            status=MonitorAlertStatus.resolved,
+            assignee_user_id="ops-lead",
+            actor_user_id="user_demo",
+            created_at=first_seen + timedelta(minutes=3),
+        ),
+        tenant_id=app_container.settings.app_tenant_id,
+    )
+    try:
+        client = TestClient(app)
+        response = client.get(
+            "/api/v1/admin/monitor/triage/metrics",
+            headers={"X-Demo-Role": "admin"},
+            params={"source": "event_store"},
+        )
+    finally:
+        app.dependency_overrides.clear()
+        get_settings.cache_clear()
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["active_alert_count"] == 0
+    assert body["resolved_alert_count"] == 1
+    assert body["by_status"]["resolved"] == 1
+    assert body["health_status"] == "ok"
+    assert body["mtta_seconds"] == 180
+    assert body["mttr_seconds"] == 180
 
 
 def test_monitor_alert_triage_rejects_empty_or_unknown_alert(tmp_path, monkeypatch):

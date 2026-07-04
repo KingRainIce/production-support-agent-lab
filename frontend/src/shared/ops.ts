@@ -5,6 +5,7 @@ import type {
   KnowledgeSearchResponse,
   MonitorAlert,
   MonitorDrilldownResponse,
+  MonitorTriageMetricsResponse,
   ToolAuditSummary
 } from "./types";
 
@@ -83,6 +84,18 @@ export type MonitorDrilldownUiStats = {
   topFailure: string;
   topIntent: string;
   topRisk: string;
+};
+
+export type MonitorTriageHealthStats = {
+  healthStatus: "ok" | "degraded" | "critical" | "unknown";
+  activeAlerts: number;
+  unassignedActiveAlerts: number;
+  newEventsSinceTriage: number;
+  staleActiveAlerts: number;
+  p0p1Alerts: number;
+  mttaSeconds: number | null;
+  mttrSeconds: number | null;
+  oldestActiveAlertAt: string | null;
 };
 
 const SEVERITY_RANK: Record<string, number> = {
@@ -267,6 +280,33 @@ export function buildMonitorDrilldownStats(response: MonitorDrilldownResponse | 
     topFailure: response?.failure_buckets[0]?.key ?? "none",
     topIntent: response?.intent_buckets[0]?.key ?? "none",
     topRisk: response?.risk_buckets[0]?.key ?? "none"
+  };
+}
+
+export function buildMonitorTriageHealthStats(metrics: MonitorTriageMetricsResponse | null): MonitorTriageHealthStats {
+  if (!metrics) {
+    return {
+      healthStatus: "unknown",
+      activeAlerts: 0,
+      unassignedActiveAlerts: 0,
+      newEventsSinceTriage: 0,
+      staleActiveAlerts: 0,
+      p0p1Alerts: 0,
+      mttaSeconds: null,
+      mttrSeconds: null,
+      oldestActiveAlertAt: null
+    };
+  }
+  return {
+    healthStatus: metrics.health_status,
+    activeAlerts: metrics.active_alert_count,
+    unassignedActiveAlerts: metrics.unassigned_active_alert_count,
+    newEventsSinceTriage: metrics.new_events_since_triage_count,
+    staleActiveAlerts: metrics.stale_active_alert_count,
+    p0p1Alerts: (metrics.by_severity.P0 ?? 0) + (metrics.by_severity.P1 ?? 0),
+    mttaSeconds: metrics.mtta_seconds,
+    mttrSeconds: metrics.mttr_seconds,
+    oldestActiveAlertAt: metrics.oldest_active_alert_at
   };
 }
 

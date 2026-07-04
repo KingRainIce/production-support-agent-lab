@@ -10,12 +10,13 @@ It is not a mock dashboard: the UI calls server-side BFF routes, and those
 routes call the real FastAPI Agent API for monitor alerts, run traces,
 citations, knowledge diagnostics, tool audit, memory replay, and triage writes.
 It now includes queue search/sort/status filtering, operator assignment,
-monitor event drilldown with backend failure/intent/risk buckets, persisted run
-search, a Tools workbench for durable audit/SLA investigation, safe RAG recall
-diagnostics, copyable incident briefs, readiness preflight, and a staging eval
-gate. From a selected monitor event, operators can also generate a strict,
-copyable regression eval draft from the persisted run/message/event log without
-mutating production files.
+triage health metrics from persisted monitor/triage events, monitor event
+drilldown with backend failure/intent/risk buckets, persisted run search, a
+Tools workbench for durable audit/SLA investigation, safe RAG recall diagnostics,
+copyable incident briefs, readiness preflight, and a staging eval gate. From a
+selected monitor event, operators can also generate a strict, copyable
+regression eval draft from the persisted run/message/event log without mutating
+production files.
 
 Start with `docs/frontend-console.md` after the backend quick start. In local
 learning mode, the `Run Scenario` button creates real local events through
@@ -532,6 +533,13 @@ curl "http://127.0.0.1:8000/api/v1/admin/monitor/summary?source=event_store&conv
   -H "X-Demo-Role: admin"
 ```
 
+查看值班处置健康度。它只返回聚合指标，不返回原始事件、样本 run id 或 triage note，适合放进控制台和 on-call handoff：
+
+```bash
+curl "http://127.0.0.1:8000/api/v1/admin/monitor/triage/metrics?source=event_store" \
+  -H "X-Demo-Role: admin"
+```
+
 查看原始 monitor events：
 
 ```bash
@@ -827,14 +835,15 @@ python scripts/run_monitor_eval.py
 线上 monitor 的闭环不是“看到告警就结束”。正确顺序是：
 
 1. 用 `/api/v1/admin/monitor/summary?source=event_store` 找到 `alerts[].key` 和 `sample_run_ids`。
-2. 用 `sample_run_ids` 查 `/api/v1/agent/runs/{run_id}`，确认 intent、route、tools、retrieval、policy 哪一步出问题。
-3. 如果 `trace.tool_results` 有失败、超时、幂等 replay 或异常延迟，继续查 `/api/v1/admin/tools/audit?trace_id={run_id}`。
-4. 也可以直接查 `/api/v1/admin/incidents/runs/{run_id}`，一次拿到 trace、monitor、audit 和 memory replay。
-5. 用 audit 记录确认实际 broker 调用、actor/request、错误码、幂等 hash、是否 replay。
-6. 用 `POST /api/v1/admin/monitor/alerts/{alert_key}/triage` 追加 ack/assign/note。
-7. 用 `/api/v1/admin/monitor/alerts/{alert_key}/triage` 查看处置历史。
-8. 把真实样本加入 `security_regression.json`、`tool_failure_regression.json`、`retrieval_challenge.json`、`routing_regression.json` 或 `monitor_regression.json`。
-9. 修复后跑相关 eval 和全量 `python scripts/run_release_check.py`，再把状态改成 `resolved`。
+2. 用 `/api/v1/admin/monitor/triage/metrics?source=event_store` 看 active、unassigned、new-after-triage、stale、MTTA/MTTR，判断现在是不是“有人接手但又复发”。
+3. 用 `sample_run_ids` 查 `/api/v1/agent/runs/{run_id}`，确认 intent、route、tools、retrieval、policy 哪一步出问题。
+4. 如果 `trace.tool_results` 有失败、超时、幂等 replay 或异常延迟，继续查 `/api/v1/admin/tools/audit?trace_id={run_id}`。
+5. 也可以直接查 `/api/v1/admin/incidents/runs/{run_id}`，一次拿到 trace、monitor、audit 和 memory replay。
+6. 用 audit 记录确认实际 broker 调用、actor/request、错误码、幂等 hash、是否 replay。
+7. 用 `POST /api/v1/admin/monitor/alerts/{alert_key}/triage` 追加 ack/assign/note。
+8. 用 `/api/v1/admin/monitor/alerts/{alert_key}/triage` 查看处置历史。
+9. 把真实样本加入 `security_regression.json`、`tool_failure_regression.json`、`retrieval_challenge.json`、`routing_regression.json` 或 `monitor_regression.json`。
+10. 修复后跑相关 eval 和全量 `python scripts/run_release_check.py`，再把状态改成 `resolved`。
 
 这里的设计故意是 append-only：`monitor.reviewed` 是不可改写的事实，`monitor.alert.triaged` 是后续运营动作。ack 只是“有人接手”，resolve 才表示“有修复、有验证、有回归样本”。
 

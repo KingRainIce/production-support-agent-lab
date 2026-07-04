@@ -7,6 +7,7 @@ import type {
   MonitorAlert,
   MonitorAlertTriageEvent,
   MonitorSummary,
+  MonitorTriageMetricsResponse,
   ReadinessResponse,
   StoredEvent,
   ToolDefinition
@@ -41,6 +42,13 @@ export async function GET(request: NextRequest) {
       })
     );
   }
+  const triageMetrics = await optional<MonitorTriageMetricsResponse>(
+    () =>
+      agentFetch("/api/v1/admin/monitor/triage/metrics", {
+        query: { source: monitorSource, limit: 500 }
+      }),
+    issues
+  );
 
   const activeAlert = requestedRunId
     ? selectAlertForRun(summary.alerts, requestedAlertKey, requestedRunId)
@@ -112,6 +120,7 @@ export async function GET(request: NextRequest) {
     activeAlertKey,
     activeRunId,
     incident,
+    triageMetrics,
     triageEvents: triageEvents ?? [],
     rawEvents: rawEvents ?? [],
     tools: tools ?? [],

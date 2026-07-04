@@ -238,6 +238,55 @@ export type MonitorDrilldownResponse = {
   risk_buckets: MonitorDrilldownBucket[];
 };
 
+export type MonitorTriageMetricsResponse = {
+  source: "event_store" | "live";
+  generated_at: string;
+  window: {
+    conversation_id: string | null;
+    created_after: string | null;
+    created_before: string | null;
+    limit: number;
+    order: "asc" | "desc";
+    first_seen_at: string | null;
+    last_seen_at: string | null;
+  };
+  total_events: number;
+  healthy_events: number;
+  alerted_events: number;
+  alert_rate: number;
+  grounded_rate: number;
+  policy_compliance_rate: number;
+  human_review_rate: number;
+  high_risk_events: number;
+  critical_events: number;
+  ungrounded_events: number;
+  policy_violations: number;
+  human_review_events: number;
+  pii_leak_events: number;
+  by_risk_level: Record<string, number>;
+  by_intent: Record<string, number>;
+  by_failure_type: Record<string, number>;
+  by_alert_failure_type: Record<string, number>;
+  alert_count: number;
+  active_alert_count: number;
+  resolved_alert_count: number;
+  silenced_alert_count: number;
+  assigned_alert_count: number;
+  untriaged_alert_count: number;
+  unassigned_active_alert_count: number;
+  new_events_since_triage_count: number;
+  stale_active_alert_count: number;
+  stale_threshold_seconds: number;
+  by_severity: Record<"P0" | "P1" | "P2" | "P3", number>;
+  by_status: Record<string, number>;
+  worst_active_severity: "P0" | "P1" | "P2" | "P3" | null;
+  health_status: "ok" | "degraded" | "critical";
+  mtta_seconds: number | null;
+  mttr_seconds: number | null;
+  oldest_active_alert_at: string | null;
+  latest_triage_at: string | null;
+};
+
 export type EvalCaseDraft = {
   case_id: string;
   scenario: string;
@@ -400,6 +449,7 @@ export type ConsoleSnapshot = {
   activeAlertKey: string | null;
   activeRunId: string | null;
   incident: IncidentRunBundle | null;
+  triageMetrics: MonitorTriageMetricsResponse | null;
   triageEvents: MonitorAlertTriageEvent[];
   rawEvents: StoredEvent[];
   tools: ToolDefinition[];

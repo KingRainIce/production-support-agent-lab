@@ -36,6 +36,7 @@ import {
   buildIncidentBrief,
   buildKnowledgeSearchStats,
   buildMonitorDrilldownStats,
+  buildMonitorTriageHealthStats,
   buildOpsMetrics,
   buildRunSearchStats,
   buildToolAuditStats,
@@ -45,6 +46,7 @@ import {
   type IncidentBrief,
   type KnowledgeSearchStats,
   type MonitorDrilldownUiStats,
+  type MonitorTriageHealthStats,
   type OpsMetrics,
   type RunSearchStats,
   type ToolAuditStats
@@ -274,6 +276,10 @@ export default function Home() {
   );
 
   const opsMetrics = useMemo<OpsMetrics>(() => buildOpsMetrics(snapshot), [snapshot]);
+  const triageHealthStats = useMemo<MonitorTriageHealthStats>(
+    () => buildMonitorTriageHealthStats(snapshot?.triageMetrics ?? null),
+    [snapshot?.triageMetrics]
+  );
 
   const incidentBrief = useMemo<IncidentBrief>(
     () => buildIncidentBrief(snapshot, activeAlert, evalReport),
@@ -1003,6 +1009,7 @@ export default function Home() {
                 }
               }}
               snapshot={snapshot}
+              triageHealthStats={triageHealthStats}
               filteredAlerts={filteredAlerts}
               activeAlert={activeAlert}
               loading={loading}
@@ -1273,6 +1280,7 @@ function MonitorWorkbenchPanel({
   view,
   onView,
   snapshot,
+  triageHealthStats,
   filteredAlerts,
   activeAlert,
   loading,
@@ -1311,6 +1319,7 @@ function MonitorWorkbenchPanel({
   view: AlertWorkbenchView;
   onView: (view: AlertWorkbenchView) => void;
   snapshot: ConsoleSnapshot | null;
+  triageHealthStats: MonitorTriageHealthStats;
   filteredAlerts: MonitorAlert[];
   activeAlert: MonitorAlert | null;
   loading: boolean;
@@ -1361,6 +1370,8 @@ function MonitorWorkbenchPanel({
           </strong>
         </div>
       </div>
+
+      <TriageHealthStrip stats={triageHealthStats} loading={loading} />
 
       <div className="workbench-switch" role="tablist" aria-label="Monitor workbench views">
         <button
@@ -1519,6 +1530,40 @@ function MonitorWorkbenchPanel({
         />
       )}
     </aside>
+  );
+}
+
+function TriageHealthStrip({
+  stats,
+  loading
+}: {
+  stats: MonitorTriageHealthStats;
+  loading: boolean;
+}) {
+  const tone = stats.healthStatus === "critical" ? "danger" : stats.healthStatus === "degraded" ? "warn" : "success";
+  return (
+    <section className={`triage-health-strip state-${stats.healthStatus}`} aria-label="Triage health metrics">
+      <div className="triage-health-head">
+        <span>
+          <Gauge size={15} />
+          Triage Health
+        </span>
+        <Badge tone={stats.healthStatus === "unknown" && loading ? "neutral" : tone}>
+          {stats.healthStatus === "unknown" && loading ? "loading" : stats.healthStatus}
+        </Badge>
+      </div>
+      <div className="run-search-stats triage-health-stats">
+        <Metric label="Active" value={String(stats.activeAlerts)} />
+        <Metric label="Unassigned" value={String(stats.unassignedActiveAlerts)} />
+        <Metric label="New" value={String(stats.newEventsSinceTriage)} />
+        <Metric label="MTTA" value={formatDurationSeconds(stats.mttaSeconds)} />
+      </div>
+      <div className="triage-health-meta">
+        <span>P0/P1 {stats.p0p1Alerts}</span>
+        <span>Stale {stats.staleActiveAlerts}</span>
+        <span>Oldest {ageLabel(stats.oldestActiveAlertAt)}</span>
+      </div>
+    </section>
   );
 }
 
@@ -3424,6 +3469,20 @@ function formatDurationMs(value: number | null | undefined) {
     return "n/a";
   }
   return value > 1000 ? `${(value / 1000).toFixed(1)}s` : `${value}ms`;
+}
+
+function formatDurationSeconds(value: number | null | undefined) {
+  if (value === null || value === undefined) {
+    return "n/a";
+  }
+  if (value < 60) {
+    return `${value}s`;
+  }
+  const minutes = Math.round(value / 60);
+  if (minutes < 60) {
+    return `${minutes}m`;
+  }
+  return `${(value / 3600).toFixed(1)}h`;
 }
 
 function runDuration(run: AgentRunTrace | null) {

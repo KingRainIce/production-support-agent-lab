@@ -3,6 +3,7 @@ import {
   buildIncidentBrief,
   buildKnowledgeSearchStats,
   buildMonitorDrilldownStats,
+  buildMonitorTriageHealthStats,
   buildOpsMetrics,
   buildRunSearchStats,
   buildToolAuditStats,
@@ -12,7 +13,8 @@ import type {
   ConsoleSnapshot,
   KnowledgeSearchResponse,
   MonitorAlert,
-  MonitorDrilldownResponse
+  MonitorDrilldownResponse,
+  MonitorTriageMetricsResponse
 } from "../src/shared/types";
 
 function alert(overrides: Partial<MonitorAlert>): MonitorAlert {
@@ -32,6 +34,64 @@ function alert(overrides: Partial<MonitorAlert>): MonitorAlert {
     last_triage_note: null,
     new_events_since_triage: false,
     ...overrides
+  };
+}
+
+function triageMetrics(
+  overrides: Partial<Omit<MonitorTriageMetricsResponse, "window">> & {
+    window?: Partial<MonitorTriageMetricsResponse["window"]>;
+  } = {}
+): MonitorTriageMetricsResponse {
+  const window = {
+    conversation_id: null,
+    created_after: null,
+    created_before: null,
+    limit: 500,
+    order: "desc" as const,
+    first_seen_at: "2026-07-04T00:00:00.000Z",
+    last_seen_at: "2026-07-04T00:05:00.000Z",
+    ...overrides.window
+  };
+  return {
+    source: "event_store",
+    generated_at: "2026-07-04T00:06:00.000Z",
+    total_events: 2,
+    healthy_events: 0,
+    alerted_events: 2,
+    alert_rate: 1,
+    grounded_rate: 0.5,
+    policy_compliance_rate: 0.5,
+    human_review_rate: 1,
+    high_risk_events: 1,
+    critical_events: 0,
+    ungrounded_events: 1,
+    policy_violations: 1,
+    human_review_events: 2,
+    pii_leak_events: 0,
+    by_risk_level: { high: 1 },
+    by_intent: { order_status: 2 },
+    by_failure_type: { TIMEOUT: 2 },
+    by_alert_failure_type: { TIMEOUT: 2 },
+    alert_count: 2,
+    active_alert_count: 1,
+    resolved_alert_count: 1,
+    silenced_alert_count: 0,
+    assigned_alert_count: 1,
+    untriaged_alert_count: 0,
+    unassigned_active_alert_count: 1,
+    new_events_since_triage_count: 1,
+    stale_active_alert_count: 1,
+    stale_threshold_seconds: 3600,
+    by_severity: { P0: 0, P1: 1, P2: 1, P3: 0 },
+    by_status: { open: 1, acknowledged: 0, investigating: 0, resolved: 1, silenced: 0 },
+    worst_active_severity: "P1",
+    health_status: "degraded",
+    mtta_seconds: 120,
+    mttr_seconds: 240,
+    oldest_active_alert_at: "2026-07-04T00:00:00.000Z",
+    latest_triage_at: "2026-07-04T00:04:00.000Z",
+    ...overrides,
+    window
   };
 }
 
@@ -129,6 +189,7 @@ describe("ops workbench helpers", () => {
         memory_replay: null
       },
       triageEvents: [],
+      triageMetrics: null,
       rawEvents: [],
       tools: [],
       issues: [],
@@ -363,5 +424,42 @@ describe("ops workbench helpers", () => {
     expect(stats.matchingEvents).toBe(0);
     expect(stats.alertRate).toBe(0);
     expect(stats.topFailure).toBe("none");
+  });
+
+  it("normalizes monitor triage health metrics for the workbench strip", () => {
+    const stats = buildMonitorTriageHealthStats(
+      triageMetrics({
+        active_alert_count: 3,
+        unassigned_active_alert_count: 2,
+        new_events_since_triage_count: 1,
+        stale_active_alert_count: 1,
+        by_severity: { P0: 1, P1: 2, P2: 0, P3: 0 },
+        health_status: "critical",
+        mtta_seconds: 90,
+        mttr_seconds: null,
+        oldest_active_alert_at: "2026-07-04T00:00:00.000Z"
+      })
+    );
+
+    expect(stats.healthStatus).toBe("critical");
+    expect(stats.activeAlerts).toBe(3);
+    expect(stats.unassignedActiveAlerts).toBe(2);
+    expect(stats.newEventsSinceTriage).toBe(1);
+    expect(stats.staleActiveAlerts).toBe(1);
+    expect(stats.p0p1Alerts).toBe(3);
+    expect(stats.mttaSeconds).toBe(90);
+    expect(stats.mttrSeconds).toBeNull();
+    expect(stats.oldestActiveAlertAt).toBe("2026-07-04T00:00:00.000Z");
+  });
+
+  it("returns stable empty monitor triage health metrics", () => {
+    const stats = buildMonitorTriageHealthStats(null);
+
+    expect(stats.healthStatus).toBe("unknown");
+    expect(stats.activeAlerts).toBe(0);
+    expect(stats.unassignedActiveAlerts).toBe(0);
+    expect(stats.newEventsSinceTriage).toBe(0);
+    expect(stats.p0p1Alerts).toBe(0);
+    expect(stats.mttaSeconds).toBeNull();
   });
 });

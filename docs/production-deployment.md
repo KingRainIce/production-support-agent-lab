@@ -131,6 +131,7 @@ Admin role is not a wildcard. Production admin endpoints also require explicit m
 | `/api/v1/admin/monitor/summary` | `monitor:read` |
 | `/api/v1/admin/monitor/events` | `monitor:read` |
 | `GET /api/v1/admin/monitor/drilldown` | `monitor:read` |
+| `GET /api/v1/admin/monitor/triage/metrics` | `monitor:read` |
 | `GET /api/v1/admin/monitor/alerts/{alert_key}/triage` | `monitor:read` |
 | `POST /api/v1/admin/monitor/alerts/{alert_key}/triage` | `monitor:write` |
 | `/api/v1/admin/events` | `events:read` |
@@ -147,6 +148,14 @@ also accepts `alert_key`, `intent`, `risk_level`, `failure_type`,
 `needs_human_review`, `grounded`, `policy_compliant`, `include_healthy`, and
 `limit`; it returns the matching monitor events plus backend-derived failure,
 intent, and risk buckets.
+
+`GET /api/v1/admin/monitor/triage/metrics` is the compact production health
+view for on-call handoff. It reads the same persisted `monitor.reviewed` and
+`monitor.alert.triaged` event streams, then returns only aggregate fields:
+active alerts, unresolved ownership, new events since triage, stale active
+alerts, severity/status counts, health status, MTTA, and MTTR. It intentionally
+does not return raw monitor events, sample run ids, event summaries, or triage
+notes.
 
 `POST /api/v1/admin/evals/regression-drafts` is production-allowed because it
 is read-only. It loads the persisted run, selected monitor event, and message
