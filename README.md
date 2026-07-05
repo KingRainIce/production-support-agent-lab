@@ -49,10 +49,10 @@
 - RAG recall diagnostics，返回安全 snippet 而不是完整文档
 - incident brief，一键复制 Markdown
 - memory replay
-- response feedback workbench：读取真实 run 的好评/差评、reason 分布和用户评论
+- response feedback workbench：读取真实 run 的好评/差评、reason 分布和用户评论，并从负反馈生成 regression draft
 - staging eval gate 和 append-only eval gate history
 - promotion gate：聚合 readiness、monitor、tool audit、staging eval，判断是否可晋级
-- 从真实 monitor event 生成 regression eval draft
+- 从真实 monitor event 或 response feedback 生成 regression eval draft
 
 本地运行后打开：
 
@@ -243,7 +243,7 @@ curl http://127.0.0.1:8000/api/v1/agent/runs/run_abc123
 4. 故意加一个失败 eval case，观察 runner 输出的 `failures`。
 5. 打开 `docs/tool-failure-playbook.md`，理解工具超时、越权、NOT_FOUND 为什么不能靠 prompt 兜底。
 6. 运行 `python scripts/run_retrieval_eval.py`，看 retrieval challenge 如何定位召回问题。
-7. 在控制台里从 monitor alert 打开 incident brief，再生成 regression draft。
+7. 在控制台里从 monitor alert 打开 incident brief，或从 Feedback workbench 选一条负反馈，再生成 regression draft。
 8. 修复后跑相关 eval 和全量 release check。
 
 ## 核心架构

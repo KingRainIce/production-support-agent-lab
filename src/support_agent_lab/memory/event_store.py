@@ -249,6 +249,24 @@ class SQLiteEventStore:
             rows = conn.execute(sql, [*params, limit]).fetchall()
         return [AgentFeedback.model_validate(json.loads(row["payload_json"])) for row in rows]
 
+    def get_agent_feedback(
+        self,
+        feedback_id: str,
+        *,
+        tenant_id: str | None = None,
+    ) -> AgentFeedback | None:
+        sql = "select payload_json from events where event_type = ? and json_extract(payload_json, '$.id') = ?"
+        params: list[Any] = [FEEDBACK_EVENT_TYPE, feedback_id]
+        if tenant_id:
+            sql += " and tenant_id = ?"
+            params.append(tenant_id)
+        sql += " order by created_at desc, rowid desc limit 1"
+        with self._connect() as conn:
+            row = conn.execute(sql, params).fetchone()
+        if row is None:
+            return None
+        return AgentFeedback.model_validate(json.loads(row["payload_json"]))
+
     def summarize_agent_feedback(
         self,
         *,

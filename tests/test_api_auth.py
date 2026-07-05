@@ -2499,6 +2499,62 @@ def test_admin_can_draft_regression_case_from_monitor_event_store(tmp_path, monk
     EvalCase.model_validate(body["draft"])
 
 
+def test_admin_can_draft_regression_case_from_feedback_event_store(tmp_path, monkeypatch):
+    monkeypatch.setenv("APP_DATABASE_URL", f"sqlite:///{tmp_path / 'events.db'}")
+    get_settings.cache_clear()
+    app_container = create_container()
+    app.dependency_overrides[get_container] = lambda: app_container
+    try:
+        client = TestClient(app)
+        session = client.post("/api/v1/chat/sessions", json={"user_id": "user_demo"}).json()
+        message = client.post(
+            "/api/v1/chat/messages",
+            json={
+                "conversation_id": session["conversation_id"],
+                "user_id": "user_demo",
+                "content": "Where is order A1002 shipping?",
+            },
+        ).json()
+        trace_id = message["trace_id"]
+        feedback = client.post(
+            f"/api/v1/agent/runs/{trace_id}/feedback",
+            json={
+                "rating": "negative",
+                "reasons": ["wrong_order"],
+                "comment": "The answer referenced the wrong package status.",
+            },
+        ).json()
+        app_container.orchestrator.runs.clear()
+        app_container.monitor.events.clear()
+        app_container.memory.states.clear()
+
+        response = client.post(
+            "/api/v1/admin/evals/regression-drafts",
+            headers={"X-Demo-Role": "admin"},
+            json={
+                "run_id": trace_id,
+                "feedback_id": feedback["id"],
+                "source": "event_store",
+            },
+        )
+    finally:
+        app.dependency_overrides.clear()
+        get_settings.cache_clear()
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["source"]["feedback_id"] == feedback["id"]
+    assert body["source"]["feedback_rating"] == "negative"
+    assert body["source"]["feedback_reasons"] == ["wrong_order"]
+    assert body["draft"]["case_id"].startswith("draft_order_status_feedback_negative")
+    assert "feedback" in body["draft"]["tags"]
+    assert "feedback_reason_wrong_order" in body["draft"]["tags"]
+    assert "The answer referenced the wrong package status." in body["draft"]["scenario"]
+    assert "Feedback-derived draft needs human review" in " ".join(body["warnings"])
+    assert json.loads(body["draft_json"]) == body["draft"]
+    EvalCase.model_validate(body["draft"])
+
+
 def test_regression_draft_keeps_failed_tools_out_of_required_tools(tmp_path, monkeypatch):
     monkeypatch.setenv("APP_DATABASE_URL", f"sqlite:///{tmp_path / 'events.db'}")
     get_settings.cache_clear()
@@ -2557,6 +2613,10 @@ def test_production_regression_draft_requires_read_scopes(tmp_path, monkeypatch)
             },
         ).json()["trace_id"]
         monitor_event = app_container.event_store.list_monitor_events(run_id=trace_id)[0]
+        feedback = client.post(
+            f"/api/v1/agent/runs/{trace_id}/feedback",
+            json={"rating": "negative", "reasons": ["wrong_order"]},
+        ).json()
 
         monkeypatch.setenv("APP_ENV", "production")
         monkeypatch.setenv("APP_INTERNAL_API_KEY", "secret")
@@ -2577,6 +2637,16 @@ def test_production_regression_draft_requires_read_scopes(tmp_path, monkeypatch)
             headers=_production_headers(scopes="events:read,monitor:read"),
             json={"run_id": trace_id, "monitor_event_id": monitor_event.id},
         )
+        missing_feedback = client.post(
+            "/api/v1/admin/evals/regression-drafts",
+            headers=_production_headers(scopes="events:read,monitor:read"),
+            json={"run_id": trace_id, "feedback_id": feedback["id"]},
+        )
+        allowed_feedback = client.post(
+            "/api/v1/admin/evals/regression-drafts",
+            headers=_production_headers(scopes="events:read,monitor:read,feedback:read"),
+            json={"run_id": trace_id, "feedback_id": feedback["id"]},
+        )
     finally:
         app.dependency_overrides.clear()
         get_settings.cache_clear()
@@ -2586,6 +2656,10 @@ def test_production_regression_draft_requires_read_scopes(tmp_path, monkeypatch)
     assert missing_monitor.status_code == 403
     assert missing_monitor.json()["detail"] == "Missing required scope: monitor:read"
     assert allowed.status_code == 200
+    assert missing_feedback.status_code == 403
+    assert missing_feedback.json()["detail"] == "Missing required scope: feedback:read"
+    assert allowed_feedback.status_code == 200
+    assert allowed_feedback.json()["source"]["feedback_id"] == feedback["id"]
 
 
 def test_admin_can_replay_conversation_memory_from_events():

@@ -244,6 +244,7 @@ export default function Home() {
   const [feedbackResults, setFeedbackResults] = useState<FeedbackSearchResponse | null>(null);
   const [feedbackLoading, setFeedbackLoading] = useState(false);
   const [feedbackError, setFeedbackError] = useState<string | null>(null);
+  const [selectedFeedbackId, setSelectedFeedbackId] = useState<string | null>(null);
   const [eventBackupLabel, setEventBackupLabel] = useState("manual");
   const [eventBackupReport, setEventBackupReport] = useState<SQLiteBackupReport | null>(null);
   const [eventOpsBusy, setEventOpsBusy] = useState<string | null>(null);
@@ -1002,9 +1003,13 @@ export default function Home() {
     setWorkspaceMode("feedback");
     setSelectedAlertKey(null);
     setSelectedRunId(record.run_id);
+    setSelectedFeedbackId(record.id);
     setRunQuery(record.run_id);
     setFeedbackRunId(record.run_id);
     setFeedbackConversationId(record.conversation_id);
+    setRegressionDraft((current) => (current?.source.feedback_id === record.id ? current : null));
+    setRegressionDraftError(null);
+    setCopiedRegressionDraft(false);
     void loadSnapshot({ runId: record.run_id });
   }
 
@@ -1054,6 +1059,37 @@ export default function Home() {
       setRegressionDraft(data as RegressionDraftResponse);
     } catch (nextError) {
       setRegressionDraftError(nextError instanceof Error ? nextError.message : "Regression draft failed");
+    } finally {
+      setRegressionDraftLoadingId(null);
+    }
+  }
+
+  async function createFeedbackRegressionDraft(feedback: AgentFeedback) {
+    setSelectedFeedbackId(feedback.id);
+    setRegressionDraftLoadingId(feedback.id);
+    setRegressionDraftError(null);
+    setCopiedRegressionDraft(false);
+    try {
+      const response = await fetch("/api/console/evals/regression-drafts", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        cache: "no-store",
+        body: JSON.stringify({
+          run_id: feedback.run_id,
+          feedback_id: feedback.id,
+          failure_type: feedback.reasons[0] ? `FEEDBACK_${feedback.reasons[0].toUpperCase()}` : null,
+          source: "event_store"
+        })
+      });
+      const data = await response.json();
+      if (!response.ok) {
+        throw new Error(data.detail ?? "Feedback regression draft failed");
+      }
+      setRegressionDraft(data as RegressionDraftResponse);
+    } catch (nextError) {
+      setRegressionDraftError(
+        nextError instanceof Error ? nextError.message : "Feedback regression draft failed"
+      );
     } finally {
       setRegressionDraftLoadingId(null);
     }
@@ -1458,6 +1494,11 @@ export default function Home() {
               limit={feedbackLimit}
               order={feedbackOrder}
               currentRunId={run?.id ?? null}
+              selectedFeedbackId={selectedFeedbackId}
+              regressionDraft={regressionDraft}
+              regressionDraftLoadingId={regressionDraftLoadingId}
+              regressionDraftError={regressionDraftError}
+              copiedRegressionDraft={copiedRegressionDraft}
               onRating={setFeedbackRating}
               onRunId={setFeedbackRunId}
               onUserId={setFeedbackUserId}
@@ -1469,6 +1510,8 @@ export default function Home() {
               onSubmit={submitFeedbackSearch}
               onSearch={searchFeedback}
               onOpenFeedback={openFeedbackRecord}
+              onDraftFeedback={createFeedbackRegressionDraft}
+              onCopyRegressionDraft={() => void copyRegressionDraft()}
             />
           ) : workspaceMode === "settings" ? (
             <SettingsWorkbenchPanel
@@ -3102,6 +3145,11 @@ function FeedbackWorkbenchPanel({
   limit,
   order,
   currentRunId,
+  selectedFeedbackId,
+  regressionDraft,
+  regressionDraftLoadingId,
+  regressionDraftError,
+  copiedRegressionDraft,
   onRating,
   onRunId,
   onUserId,
@@ -3112,7 +3160,9 @@ function FeedbackWorkbenchPanel({
   onOrder,
   onSubmit,
   onSearch,
-  onOpenFeedback
+  onOpenFeedback,
+  onDraftFeedback,
+  onCopyRegressionDraft
 }: {
   results: FeedbackSearchResponse | null;
   loading: boolean;
@@ -3126,6 +3176,11 @@ function FeedbackWorkbenchPanel({
   limit: string;
   order: "asc" | "desc";
   currentRunId: string | null;
+  selectedFeedbackId: string | null;
+  regressionDraft: RegressionDraftResponse | null;
+  regressionDraftLoadingId: string | null;
+  regressionDraftError: string | null;
+  copiedRegressionDraft: boolean;
   onRating: (value: string) => void;
   onRunId: (value: string) => void;
   onUserId: (value: string) => void;
@@ -3137,6 +3192,8 @@ function FeedbackWorkbenchPanel({
   onSubmit: (event: FormEvent<HTMLFormElement>) => void;
   onSearch: (overrides?: FeedbackSearchOverrides) => void | Promise<void>;
   onOpenFeedback: (feedback: AgentFeedback) => void;
+  onDraftFeedback: (feedback: AgentFeedback) => void | Promise<void>;
+  onCopyRegressionDraft: () => void | Promise<void>;
 }) {
   const items = results?.items ?? [];
   const summary = results?.summary ?? null;
@@ -3248,39 +3305,115 @@ function FeedbackWorkbenchPanel({
         {!results && !loading ? (
           <PanelEmpty title="Search response feedback" detail="Review thumbs up/down reasons linked to real agent runs." />
         ) : null}
-        {items.map((feedback) => (
-          <button
-            type="button"
-            className={`run-result-card ${feedback.run_id === currentRunId ? "is-selected" : ""}`}
-            key={feedback.id}
-            onClick={() => onOpenFeedback(feedback)}
-            aria-pressed={feedback.run_id === currentRunId}
-          >
-            <div className="run-result-top">
-              <Badge tone={feedback.rating === "positive" ? "success" : "danger"}>{feedback.rating}</Badge>
-              <time title={feedback.created_at}>{ageLabel(feedback.created_at)}</time>
+        {items.map((feedback) => {
+          const isSelected = feedback.id === selectedFeedbackId;
+          return (
+            <div className="monitor-event-result" key={feedback.id}>
+              <button
+                type="button"
+                className={`run-result-card ${isSelected ? "is-selected" : ""}`}
+                onClick={() => onOpenFeedback(feedback)}
+                aria-pressed={isSelected}
+              >
+                <div className="run-result-top">
+                  <Badge tone={feedback.rating === "positive" ? "success" : "danger"}>{feedback.rating}</Badge>
+                  <time title={feedback.created_at}>{ageLabel(feedback.created_at)}</time>
+                </div>
+                <strong>{feedback.run_id}</strong>
+                <span>{feedback.conversation_id}</span>
+                {feedback.reasons.length ? (
+                  <div className="tag-row">
+                    {feedback.reasons.slice(0, 4).map((reason) => (
+                      <Badge tone={feedback.rating === "negative" ? "warn" : "success"} key={reason}>
+                        {reason}
+                      </Badge>
+                    ))}
+                  </div>
+                ) : null}
+                {feedback.comment ? <p className="feedback-comment">{feedback.comment}</p> : null}
+                <div className="run-result-meta">
+                  <span>{feedback.user_id}</span>
+                  <span>{feedback.source}</span>
+                  <span>{feedback.id}</span>
+                </div>
+              </button>
+              {isSelected ? (
+                <FeedbackRegressionDraftPanel
+                  feedback={feedback}
+                  draft={regressionDraft}
+                  loading={regressionDraftLoadingId === feedback.id}
+                  error={regressionDraftError}
+                  copied={copiedRegressionDraft}
+                  onDraft={() => void onDraftFeedback(feedback)}
+                  onCopy={() => void onCopyRegressionDraft()}
+                />
+              ) : null}
             </div>
-            <strong>{feedback.run_id}</strong>
-            <span>{feedback.conversation_id}</span>
-            {feedback.reasons.length ? (
-              <div className="tag-row">
-                {feedback.reasons.slice(0, 4).map((reason) => (
-                  <Badge tone={feedback.rating === "negative" ? "warn" : "success"} key={reason}>
-                    {reason}
-                  </Badge>
-                ))}
-              </div>
-            ) : null}
-            {feedback.comment ? <p className="feedback-comment">{feedback.comment}</p> : null}
-            <div className="run-result-meta">
-              <span>{feedback.user_id}</span>
-              <span>{feedback.source}</span>
-              <span>{feedback.id}</span>
-            </div>
-          </button>
-        ))}
+          );
+        })}
       </div>
     </aside>
+  );
+}
+
+function FeedbackRegressionDraftPanel({
+  feedback,
+  draft,
+  loading,
+  error,
+  copied,
+  onDraft,
+  onCopy
+}: {
+  feedback: AgentFeedback;
+  draft: RegressionDraftResponse | null;
+  loading: boolean;
+  error: string | null;
+  copied: boolean;
+  onDraft: () => void;
+  onCopy: () => void;
+}) {
+  const currentDraft = draft?.source.feedback_id === feedback.id ? draft : null;
+  return (
+    <section className="regression-draft-card" aria-label="Feedback regression eval draft">
+      <div className="regression-draft-actions">
+        <button type="button" className="secondary-button" onClick={onDraft} disabled={loading}>
+          {loading ? <Loader2 className="spin" size={15} /> : <FileCheck2 size={15} />}
+          Draft eval
+        </button>
+        <button
+          type="button"
+          className="secondary-button"
+          onClick={onCopy}
+          disabled={!currentDraft}
+        >
+          {copied ? <Check size={15} /> : <Copy size={15} />}
+          {copied ? "Copied" : "Copy JSON"}
+        </button>
+      </div>
+      {error ? <div className="inline-error">{error}</div> : null}
+      {currentDraft ? (
+        <>
+          <div className="regression-draft-meta">
+            <Badge>{currentDraft.target_file}</Badge>
+            <Badge>{currentDraft.draft.case_id}</Badge>
+            {currentDraft.source.feedback_reasons?.slice(0, 2).map((reason) => (
+              <Badge tone="warn" key={reason}>
+                {reason}
+              </Badge>
+            ))}
+          </div>
+          {currentDraft.warnings.length ? (
+            <div className="regression-draft-warnings">
+              {currentDraft.warnings.slice(0, 3).map((warning) => (
+                <span key={warning}>{warning}</span>
+              ))}
+            </div>
+          ) : null}
+          <pre>{currentDraft.draft_json}</pre>
+        </>
+      ) : null}
+    </section>
   );
 }
 

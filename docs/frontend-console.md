@@ -62,7 +62,8 @@ real local FastAPI endpoints:
    from queue triage to event-level investigation by alert key, intent, risk,
    failure type, grounding, policy status, and human-review state.
 11. `POST /api/v1/admin/evals/regression-drafts` when an operator turns a
-   selected monitor event into a copyable eval-case draft.
+   selected monitor event or response-feedback record into a copyable eval-case
+   draft.
 12. `POST /api/v1/admin/event-store/backups` when the `Settings` workbench
    creates a verified SQLite backup.
 13. `POST /api/v1/admin/event-store/retention` when the `Settings` workbench

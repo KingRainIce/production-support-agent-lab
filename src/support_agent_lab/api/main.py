@@ -240,6 +240,7 @@ class PromotionGateResponse(BaseModel):
 class RegressionDraftRequest(BaseModel):
     run_id: str = Field(min_length=1, max_length=128)
     monitor_event_id: str | None = Field(default=None, max_length=128)
+    feedback_id: str | None = Field(default=None, max_length=128)
     failure_type: str | None = Field(default=None, max_length=100)
     source: str = Field(default="event_store", pattern="^(live|event_store)$")
     limit: int = Field(default=500, ge=1, le=1000)
@@ -272,6 +273,9 @@ class RegressionDraftSource(BaseModel):
     run_source: str
     monitor_source: str
     monitor_event_ids: list[str] = Field(default_factory=list)
+    feedback_id: str | None = None
+    feedback_rating: FeedbackRating | None = None
+    feedback_reasons: list[str] = Field(default_factory=list)
     conversation_id: str
     alert_key: str | None = None
 
@@ -807,6 +811,12 @@ SECURITY_FAILURE_LABELS = {
     "PII_IN_OUTPUT",
     "FORBIDDEN",
     "UNAUTHORIZED",
+    "FEEDBACK_UNSAFE",
+    "FEEDBACK_POLICY",
+    "FEEDBACK_POLICY_VIOLATION",
+    "FEEDBACK_PRIVACY",
+    "FEEDBACK_PII",
+    "FEEDBACK_PROMPT_INJECTION",
 }
 INJECTABLE_TOOL_FAULT_CODES = {
     "RATE_LIMITED",
@@ -830,6 +840,7 @@ def _regression_draft_response(
     monitor_source: str,
     monitor_event: MonitorEvent | None,
     monitor_events: list[MonitorEvent],
+    feedback: AgentFeedback | None,
     messages: list[Message],
     requested_failure_type: str | None,
 ) -> RegressionDraftResponse:
@@ -839,7 +850,7 @@ def _regression_draft_response(
     redactions.extend(turn_redactions)
     if not messages:
         warnings.append("No message events were available; review the synthetic turn before committing.")
-    failure_labels = _regression_failure_labels(run, monitor_event, requested_failure_type)
+    failure_labels = _regression_failure_labels(run, monitor_event, feedback, requested_failure_type)
     target_file = _regression_target_file(run, failure_labels)
     expected = _regression_expected(run, monitor_event, target_file)
     if not expected:
@@ -849,12 +860,11 @@ def _regression_draft_response(
         warnings.append("Tool faults are injected before real handlers; review that the failure should be simulated offline.")
     if "PII_IN_OUTPUT" in failure_labels:
         warnings.append("PII_IN_OUTPUT is observed by the online monitor; add answer-level checks before committing.")
+    if feedback:
+        warnings.append("Feedback-derived draft needs human review of answer-level assertions before committing.")
 
-    scenario, scenario_redactions = _redact_eval_text(
-        "Regression draft from monitor event "
-        f"{monitor_event.id if monitor_event else 'none'} for run {run.id}. "
-        f"{monitor_event.summary if monitor_event else 'No monitor event was selected.'}"
-    )
+    scenario_seed = _regression_scenario_seed(run, monitor_event, feedback)
+    scenario, scenario_redactions = _redact_eval_text(scenario_seed)
     redactions.extend(scenario_redactions)
     draft: dict[str, Any] = {
         "case_id": _regression_case_id(run, failure_labels),
@@ -863,7 +873,7 @@ def _regression_draft_response(
         "user_id": run.user_id,
         "turns": turns,
         "expected": expected,
-        "tags": _regression_tags(run, monitor_event, failure_labels),
+        "tags": _regression_tags(run, monitor_event, feedback, failure_labels),
     }
     if tool_faults:
         draft["tool_faults"] = [fault.model_dump(mode="json", exclude_defaults=True) for fault in tool_faults]
@@ -881,6 +891,9 @@ def _regression_draft_response(
             run_source=run_source,
             monitor_source=monitor_source,
             monitor_event_ids=selected_monitor_event_ids,
+            feedback_id=feedback.id if feedback else None,
+            feedback_rating=feedback.rating if feedback else None,
+            feedback_reasons=feedback.reasons if feedback else [],
             conversation_id=run.conversation_id,
             alert_key=monitor_event.alert_key if monitor_event else None,
         ),
@@ -1471,9 +1484,29 @@ def _regression_tool_faults(run: AgentRunTrace) -> list[EvalToolFault]:
     return faults
 
 
+def _regression_scenario_seed(
+    run: AgentRunTrace,
+    monitor_event: MonitorEvent | None,
+    feedback: AgentFeedback | None,
+) -> str:
+    if feedback:
+        reasons = ", ".join(feedback.reasons) or "none"
+        comment = feedback.comment or "No feedback comment."
+        return (
+            f"Regression draft from response feedback {feedback.id} for run {run.id}. "
+            f"Rating: {feedback.rating.value}. Reasons: {reasons}. Comment: {comment}"
+        )
+    return (
+        "Regression draft from monitor event "
+        f"{monitor_event.id if monitor_event else 'none'} for run {run.id}. "
+        f"{monitor_event.summary if monitor_event else 'No monitor event was selected.'}"
+    )
+
+
 def _regression_failure_labels(
     run: AgentRunTrace,
     monitor_event: MonitorEvent | None,
+    feedback: AgentFeedback | None,
     requested_failure_type: str | None,
 ) -> list[str]:
     labels: list[str] = []
@@ -1481,6 +1514,9 @@ def _regression_failure_labels(
         labels.append(requested_failure_type)
     if monitor_event:
         labels.extend(monitor_failure_labels(monitor_event))
+    if feedback:
+        labels.append(f"FEEDBACK_{feedback.rating.value.upper()}")
+        labels.extend(f"FEEDBACK_{reason.upper()}" for reason in feedback.reasons)
     labels.extend(tool.error_code for tool in run.tool_results if tool.error_code)
     labels.extend(finding.code for finding in run.policy_findings)
     return [label for label in _unique(labels) if label != "none"]
@@ -1507,18 +1543,28 @@ def _regression_case_id(run: AgentRunTrace, failure_labels: list[str]) -> str:
 def _regression_tags(
     run: AgentRunTrace,
     monitor_event: MonitorEvent | None,
+    feedback: AgentFeedback | None,
     failure_labels: list[str],
 ) -> list[str]:
     values = [
         "regression",
-        "monitor",
         "draft",
         f"run_{_safe_eval_token(run.id)}",
     ]
     if monitor_event:
+        values.append("monitor")
         values.append(f"event_{_safe_eval_token(monitor_event.id)}")
         if monitor_event.alert_key:
             values.append(f"alert_{_safe_eval_token(monitor_event.alert_key)}")
+    if feedback:
+        values.extend(
+            [
+                "feedback",
+                f"feedback_{_safe_eval_token(feedback.id)}",
+                f"feedback_{_safe_eval_token(feedback.rating.value)}",
+            ]
+        )
+        values.extend(f"feedback_reason_{_safe_eval_token(reason)}" for reason in feedback.reasons)
     values.extend(_safe_eval_token(label) for label in failure_labels)
     return [value for value in _unique(values) if value]
 
@@ -2431,6 +2477,21 @@ def create_app() -> FastAPI:
         require_admin(actor)
         require_scope(actor, "events:read")
         require_scope(actor, "monitor:read")
+        if body.feedback_id:
+            require_scope(actor, "feedback:read")
+
+        feedback = None
+        if body.feedback_id:
+            if not deps.event_store:
+                raise HTTPException(status_code=404, detail="Event store is not configured")
+            feedback = deps.event_store.get_agent_feedback(
+                body.feedback_id,
+                tenant_id=deps.settings.app_tenant_id,
+            )
+            if feedback is None:
+                raise HTTPException(status_code=404, detail="Feedback not found")
+            if feedback.run_id != body.run_id:
+                raise HTTPException(status_code=400, detail="Feedback does not belong to run")
 
         run_source = body.source
         monitor_source = body.source
@@ -2483,6 +2544,7 @@ def create_app() -> FastAPI:
             monitor_source=monitor_source,
             monitor_event=monitor_event,
             monitor_events=monitor_events,
+            feedback=feedback,
             messages=messages,
             requested_failure_type=body.failure_type,
         )

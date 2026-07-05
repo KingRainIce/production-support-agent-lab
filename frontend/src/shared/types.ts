@@ -302,6 +302,7 @@ export type EvalCaseDraft = {
 export type RegressionDraftRequest = {
   run_id: string;
   monitor_event_id?: string | null;
+  feedback_id?: string | null;
   failure_type?: string | null;
   source?: "event_store" | "live";
 };
@@ -316,6 +317,9 @@ export type RegressionDraftResponse = {
     run_source: string;
     monitor_source: string;
     monitor_event_ids: string[];
+    feedback_id?: string | null;
+    feedback_rating?: FeedbackRating | null;
+    feedback_reasons?: string[];
     conversation_id: string;
     alert_key: string | null;
   };

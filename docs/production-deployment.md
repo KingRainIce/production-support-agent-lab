@@ -181,7 +181,7 @@ Admin role is not a wildcard. Production admin endpoints also require explicit m
 | `/api/v1/admin/events` | `events:read` |
 | `POST /api/v1/admin/event-store/backups` | `admin:write`, `audit:read`, `events:read`; backend chooses the configured backup directory. |
 | `POST /api/v1/admin/event-store/retention` | `admin:write`, `audit:read`, `events:read`; dry-run by default. |
-| `POST /api/v1/admin/evals/regression-drafts` | `events:read`, `monitor:read` |
+| `POST /api/v1/admin/evals/regression-drafts` | `events:read`, `monitor:read`; add `feedback:read` when `feedback_id` is supplied |
 | `POST /api/v1/admin/evals/golden` | `eval:run`; local/staging only. Disabled when `APP_ENV=production`. |
 | `POST /api/v1/admin/evals/staging` | `eval:run`; local/staging only. Runs bundled golden/security/tool/memory/routing/monitor/retrieval suites and appends suite + aggregate gate records. Disabled when `APP_ENV=production`. |
 | `GET /api/v1/admin/evals/gates` | `eval:read` |
@@ -193,6 +193,8 @@ Admin role is not a wildcard. Production admin endpoints also require explicit m
 `GET /api/v1/agent/runs/{run_id}` lets the original actor inspect their own run trace. Cross-user incident review must use an admin actor with `events:read`, and the endpoint falls back to the SQLite event store when live in-process run state has been cleared.
 
 `POST /api/v1/agent/runs/{run_id}/feedback` lets the original actor attach a positive or negative rating, normalized reason codes, and a short comment to their own persisted run. It requires `feedback:write`, appends an `agent.response.feedback` event, and does not mutate the run trace. `source=user` is the default. `source=operator` or `source=qa` requires an admin actor; cross-user feedback must use one of those non-user sources so operators do not impersonate end users. Admin review uses the feedback endpoints above with `feedback:read`.
+
+`POST /api/v1/admin/evals/regression-drafts` can also accept `feedback_id` with the associated `run_id`. The service loads the persisted run, message events, monitor events, and feedback event, then returns a copyable `EvalCase` draft tagged with the feedback rating and reasons. It is still read-only; operators should review answer-level assertions before committing the draft to `examples/evals/*.json`.
 
 Eval gate history is stored as append-only `eval.gate.completed` events and
 returned through the typed `GET /api/v1/admin/evals/gates` endpoint. Records

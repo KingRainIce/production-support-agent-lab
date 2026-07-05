@@ -408,6 +408,8 @@ def test_event_store_persists_and_summarizes_agent_feedback(tmp_path):
         conversation_id="conv_feedback",
         order="asc",
     )
+    loaded = event_store.get_agent_feedback(negative.id, tenant_id="tenant_a")
+    missing_tenant = event_store.get_agent_feedback(negative.id, tenant_id="tenant_b")
     negative_feedback = event_store.list_agent_feedback(
         tenant_id="tenant_a",
         rating="negative",
@@ -415,6 +417,8 @@ def test_event_store_persists_and_summarizes_agent_feedback(tmp_path):
     summary = event_store.summarize_agent_feedback(tenant_id="tenant_a")
 
     assert [feedback.id for feedback in tenant_feedback] == [positive.id, negative.id]
+    assert loaded and loaded.id == negative.id
+    assert missing_tenant is None
     assert [feedback.run_id for feedback in negative_feedback] == ["run_negative"]
     assert summary.total_count == 2
     assert summary.positive_count == 1
