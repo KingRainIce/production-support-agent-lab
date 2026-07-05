@@ -49,34 +49,36 @@ real local FastAPI endpoints:
 3. `GET /api/v1/admin/monitor/summary?source=event_store`
 4. `GET /api/v1/admin/monitor/triage/metrics?source=event_store`
 5. `GET /api/v1/admin/incidents/runs/{run_id}?include_memory=true`
-6. `GET /api/v1/admin/runs` when the `Runs` workbench searches persisted
+6. `GET /api/v1/admin/incidents/runs/{run_id}/brief` when the `Brief`
+   panel copies or downloads a backend-generated sanitized Markdown handoff.
+7. `GET /api/v1/admin/runs` when the `Runs` workbench searches persisted
    history.
-7. `GET /api/v1/admin/tools/audit` and
+8. `GET /api/v1/admin/tools/audit` and
    `GET /api/v1/admin/tools/audit/summary` when the `Tools` workbench searches
    persisted tool calls and SLA/failure aggregates.
-8. `POST /api/v1/admin/knowledge/search` when the `Knowledge` workbench runs
+9. `POST /api/v1/admin/knowledge/search` when the `Knowledge` workbench runs
    a retrieval diagnostic query.
-9. `POST /api/v1/admin/monitor/alert-deliveries/dispatch` when the `Delivery`
+10. `POST /api/v1/admin/monitor/alert-deliveries/dispatch` when the `Delivery`
    tab runs `Dispatch now` against the durable alert outbox.
-10. `GET /api/v1/admin/monitor/drilldown` when the `Alerts` workbench switches
+11. `GET /api/v1/admin/monitor/drilldown` when the `Alerts` workbench switches
    from queue triage to event-level investigation by alert key, intent, risk,
    failure type, grounding, policy status, and human-review state.
-11. `POST /api/v1/admin/evals/regression-drafts` when an operator turns a
+12. `POST /api/v1/admin/evals/regression-drafts` when an operator turns a
    selected monitor event or response-feedback record into a copyable eval-case
    draft.
-12. `POST /api/v1/admin/event-store/backups` when the `Settings` workbench
+13. `POST /api/v1/admin/event-store/backups` when the `Settings` workbench
    creates a verified SQLite backup.
-13. `POST /api/v1/admin/event-store/retention` when the `Settings` workbench
+14. `POST /api/v1/admin/event-store/retention` when the `Settings` workbench
    previews or applies the conservative retention policy.
-14. `GET /api/v1/admin/conversations/{conversation_id}/memory/replay` when
+15. `GET /api/v1/admin/conversations/{conversation_id}/memory/replay` when
    the `Memory` workbench rebuilds a conversation from append-only events.
-15. `GET /api/v1/admin/feedback` and
+16. `GET /api/v1/admin/feedback` and
    `GET /api/v1/admin/feedback/summary` when the `Feedback` workbench reviews
    user/operator ratings linked to persisted runs.
-16. `GET /api/v1/admin/promotion/decisions` and
+17. `GET /api/v1/admin/promotion/decisions` and
    `POST /api/v1/admin/promotion/decisions` when `Settings` shows or records
    append-only release decisions tied to a fresh promotion-gate snapshot.
-17. `GET /api/v1/admin/audit/export` when `Settings` downloads sanitized
+18. `GET /api/v1/admin/audit/export` when `Settings` downloads sanitized
    NDJSON for SIEM or warehouse ingestion.
 
 ## Production Run
@@ -173,8 +175,9 @@ machine.
   rate, policy compliance, the latest persisted staging eval gate status, and
   the read-only promotion gate status.
 - Incident brief with owner, risk, recommended next actions, readiness checks,
-  promotion checks, latest eval gate audit, recent gate history, and a copyable
-  Markdown handoff.
+  promotion checks, latest eval gate audit, recent gate history, and backend
+  generated Markdown that can be copied or downloaded without message content,
+  tool payloads, retrieval body text, memory facts, or feedback comments.
 - Agent run timeline from `AgentRunTrace`.
 - Retrieval citations from `run.retrieval.selected_context`.
 - Tool audit from `tool_audit_records`.

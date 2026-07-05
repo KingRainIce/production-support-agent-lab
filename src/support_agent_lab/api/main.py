@@ -153,6 +153,22 @@ class IncidentRunBundle(BaseModel):
     memory_replay: MemoryReplayResult | None = None
 
 
+class IncidentBriefResponse(BaseModel):
+    schema_version: str = "incident_brief.v1"
+    generated_at: datetime
+    title: str
+    risk_label: str
+    summary: str
+    run_id: str
+    conversation_id: str
+    run_source: str
+    alert_key: str | None = None
+    recommended_actions: list[str]
+    evidence: dict[str, Any] = Field(default_factory=dict)
+    redactions: list[str] = Field(default_factory=list)
+    markdown: str
+
+
 class KnowledgeSearchRequest(BaseModel):
     query: str = Field(min_length=1, max_length=1000)
     limit: int = Field(default=4, ge=1, le=20)
@@ -1000,6 +1016,360 @@ def _ndjson(rows: list[dict[str, Any]]) -> str:
     if not rows:
         return ""
     return "\n".join(json.dumps(row, ensure_ascii=False, sort_keys=True) for row in rows) + "\n"
+
+
+INCIDENT_BRIEF_REDACTIONS = [
+    "message_content",
+    "tool_arguments",
+    "tool_payloads",
+    "tool_error_messages",
+    "retrieval_content",
+    "memory_facts",
+    "feedback_comments",
+]
+
+
+def _load_incident_run_bundle(
+    *,
+    deps: AppContainer,
+    run_id: str,
+    include_memory: bool,
+    limit: int,
+) -> IncidentRunBundle:
+    run_source = "live"
+    run = deps.orchestrator.runs.get(run_id)
+    if run is None and deps.event_store:
+        run = deps.event_store.get_agent_run_trace(
+            run_id,
+            tenant_id=deps.settings.app_tenant_id,
+            limit=limit,
+        )
+        run_source = "event_store" if run else run_source
+    if run is None:
+        raise HTTPException(status_code=404, detail="Run not found")
+
+    monitor_source = (
+        deps.event_store.list_monitor_events(
+            tenant_id=deps.settings.app_tenant_id,
+            run_id=run_id,
+            limit=limit,
+        )
+        if deps.event_store
+        else deps.monitor.events[:limit]
+    )
+    monitor_events = [event for event in monitor_source if event.run_id == run_id]
+    tool_audit_records = (
+        deps.event_store.list_tool_audit_records(
+            tenant_id=deps.settings.app_tenant_id,
+            trace_id=run_id,
+            limit=limit,
+        )
+        if deps.event_store
+        else []
+    )
+    memory_replay = None
+    if include_memory and deps.event_store:
+        events = deps.event_store.list_conversation_memory_events(
+            tenant_id=deps.settings.app_tenant_id,
+            conversation_id=run.conversation_id,
+        )
+        if events:
+            try:
+                memory_replay = replay_conversation_memory(events)
+            except ValueError as exc:
+                raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    return IncidentRunBundle(
+        run=run,
+        run_source=run_source,
+        monitor_events=monitor_events,
+        tool_audit_records=tool_audit_records,
+        memory_replay=memory_replay,
+    )
+
+
+def _incident_brief_response(
+    bundle: IncidentRunBundle,
+    *,
+    generated_at: datetime | None = None,
+) -> IncidentBriefResponse:
+    generated_at = generated_at or utc_now()
+    run = bundle.run
+    monitor_summary = summarize_monitor_events(bundle.monitor_events)
+    alert = monitor_summary.alerts[0] if monitor_summary.alerts else None
+    monitor_event = bundle.monitor_events[0] if bundle.monitor_events else None
+    tool_failures = [tool for tool in run.tool_results if _enum_value(tool.status) != "success"]
+    tool_error_codes = _unique_strings(tool.error_code for tool in tool_failures if tool.error_code)
+    policy_codes = _unique_strings(finding.code for finding in run.policy_findings)
+    failure_types = _unique_strings(
+        failure
+        for event in bundle.monitor_events
+        for failure in event.failure_types
+    )
+    citation_count = len(run.retrieval.selected_context) if run.retrieval else 0
+    risk_label = alert.severity if alert else _incident_risk_label(bundle.monitor_events)
+    alert_key = alert.key if alert else monitor_event.alert_key if monitor_event else None
+    title = alert.reason if alert else f"Run {run.id}"
+    summary = (
+        f"Run {run.id} handled {_enum_value(run.intent.primary) if run.intent else 'unknown'} "
+        f"via {_enum_value(run.route.target) if run.route else 'unknown'} with "
+        f"{len(tool_failures)} tool failure(s), {len(run.policy_findings)} policy finding(s), "
+        f"{len(bundle.monitor_events)} monitor event(s), and {citation_count} citation(s)."
+    )
+    evidence = _incident_brief_evidence(
+        bundle=bundle,
+        alert=alert,
+        tool_failures=tool_failures,
+        tool_error_codes=tool_error_codes,
+        policy_codes=policy_codes,
+        failure_types=failure_types,
+    )
+    recommended_actions = _incident_recommended_actions(
+        alert=alert,
+        monitor_events=bundle.monitor_events,
+        tool_failures=tool_failures,
+        tool_error_codes=tool_error_codes,
+        policy_codes=policy_codes,
+        citation_count=citation_count,
+        memory_replay=bundle.memory_replay,
+    )
+    markdown = _incident_brief_markdown(
+        generated_at=generated_at,
+        run=run,
+        title=title,
+        risk_label=risk_label,
+        alert=alert,
+        alert_key=alert_key,
+        summary=summary,
+        evidence=evidence,
+        recommended_actions=recommended_actions,
+    )
+    return IncidentBriefResponse(
+        generated_at=generated_at,
+        title=title,
+        risk_label=risk_label,
+        summary=summary,
+        run_id=run.id,
+        conversation_id=run.conversation_id,
+        run_source=bundle.run_source,
+        alert_key=alert_key,
+        recommended_actions=recommended_actions,
+        evidence=evidence,
+        redactions=INCIDENT_BRIEF_REDACTIONS,
+        markdown=markdown,
+    )
+
+
+def _incident_brief_evidence(
+    *,
+    bundle: IncidentRunBundle,
+    alert: MonitorAlert | None,
+    tool_failures: list[Any],
+    tool_error_codes: list[str],
+    policy_codes: list[str],
+    failure_types: list[str],
+) -> dict[str, Any]:
+    run = bundle.run
+    retrieval_sources: list[str] = []
+    if run.retrieval:
+        retrieval_sources = _unique_strings(
+            [
+                *run.retrieval.selected_sources,
+                *(hit.document_id for hit in run.retrieval.selected_context),
+            ]
+        )[:8]
+    audit_errors = Counter(record.error_code for record in bundle.tool_audit_records if record.error_code)
+    audit_tools = _unique_strings(record.tool_name for record in bundle.tool_audit_records)[:12]
+    memory = bundle.memory_replay
+    return {
+        "run": {
+            "id": run.id,
+            "conversation_id": run.conversation_id,
+            "user_hash": _audit_hash(run.user_id),
+            "agent_version": run.agent_version,
+            "status": run.status,
+            "created_at": run.created_at,
+            "completed_at": run.completed_at,
+            "intent": _enum_value(run.intent.primary) if run.intent else None,
+            "intent_confidence": run.intent.confidence if run.intent else None,
+            "route": _enum_value(run.route.target) if run.route else None,
+            "route_needs_human": run.route.needs_human if run.route else False,
+            "tool_count": len(run.tool_results),
+            "failed_tool_count": len(tool_failures),
+            "tool_error_codes": tool_error_codes,
+            "policy_codes": policy_codes,
+            "llm_call_count": len(run.llm_calls),
+            "llm_fallback_used": any(call.fallback_used for call in run.llm_calls),
+            "citation_count": len(run.retrieval.selected_context) if run.retrieval else 0,
+            "retrieval_sources": retrieval_sources,
+        },
+        "monitor": {
+            "event_count": len(bundle.monitor_events),
+            "alert_key": alert.key if alert else None,
+            "severity": alert.severity if alert else None,
+            "alert_status": _enum_value(alert.status) if alert else None,
+            "assignee_user_id": alert.assignee_user_id if alert else None,
+            "new_events_since_triage": alert.new_events_since_triage if alert else False,
+            "failure_types": failure_types,
+            "risk_levels": _unique_strings(_enum_value(event.risk_level) for event in bundle.monitor_events),
+            "ungrounded_events": sum(1 for event in bundle.monitor_events if not event.grounded),
+            "policy_violation_events": sum(1 for event in bundle.monitor_events if not event.policy_compliant),
+            "human_review_events": sum(1 for event in bundle.monitor_events if event.needs_human_review),
+            "pii_leak_events": sum(1 for event in bundle.monitor_events if event.pii_leak),
+        },
+        "tool_audit": {
+            "record_count": len(bundle.tool_audit_records),
+            "failed_record_count": sum(1 for record in bundle.tool_audit_records if _enum_value(record.status) == "failed"),
+            "tools": audit_tools,
+            "top_error_codes": [
+                {"error_code": str(error_code), "count": count}
+                for error_code, count in audit_errors.most_common(5)
+            ],
+        },
+        "memory": {
+            "included": memory is not None,
+            "event_count": memory.event_count if memory else 0,
+            "replayed_message_count": memory.replayed_message_count if memory else 0,
+            "replayed_run_count": memory.replayed_run_count if memory else 0,
+            "ignored_event_count": memory.ignored_event_count if memory else 0,
+            "fact_count": len(memory.state.facts) if memory else 0,
+            "open_question_count": len(memory.state.open_questions) if memory else 0,
+        },
+    }
+
+
+def _incident_recommended_actions(
+    *,
+    alert: MonitorAlert | None,
+    monitor_events: list[MonitorEvent],
+    tool_failures: list[Any],
+    tool_error_codes: list[str],
+    policy_codes: list[str],
+    citation_count: int,
+    memory_replay: MemoryReplayResult | None,
+) -> list[str]:
+    actions: list[str] = []
+    if alert and not alert.assignee_user_id and _enum_value(alert.status) in {"open", "acknowledged", "investigating"}:
+        actions.append("Assign an owner before changing prompts or tools.")
+    if alert and alert.new_events_since_triage:
+        actions.append("Re-open triage because new monitor events arrived after the last action.")
+    if tool_failures:
+        codes = ", ".join(tool_error_codes) if tool_error_codes else "TOOL_FAILED"
+        actions.append(f"Inspect tool audit and upstream health for {codes}.")
+    if policy_codes:
+        actions.append(f"Review policy findings before replaying the case: {', '.join(policy_codes)}.")
+    if any(not event.grounded for event in monitor_events) or citation_count == 0:
+        actions.append("Check retrieval diagnostics and add a retrieval challenge case if grounding is weak.")
+    if memory_replay is None:
+        actions.append("Fetch memory replay when the incident depends on earlier turns.")
+    if not actions:
+        actions.append("No blocking signal found; keep this brief as the audit note for the run.")
+    actions.append("Turn the confirmed failure into a regression eval before shipping a fix.")
+    return _unique_strings(actions)
+
+
+def _incident_brief_markdown(
+    *,
+    generated_at: datetime,
+    run: AgentRunTrace,
+    title: str,
+    risk_label: str,
+    alert: MonitorAlert | None,
+    alert_key: str | None,
+    summary: str,
+    evidence: dict[str, Any],
+    recommended_actions: list[str],
+) -> str:
+    run_evidence = evidence["run"]
+    monitor_evidence = evidence["monitor"]
+    tool_audit_evidence = evidence["tool_audit"]
+    memory_evidence = evidence["memory"]
+    lines = [
+        "# PSA Lab Incident Brief",
+        "",
+        f"- Generated: {generated_at.isoformat()}",
+        f"- Title: {title}",
+        f"- Risk: {risk_label}",
+        f"- Alert: {alert_key or 'none'}",
+        f"- Alert status: {_enum_value(alert.status) if alert else 'none'}",
+        f"- Assignee: {alert.assignee_user_id if alert and alert.assignee_user_id else 'unassigned'}",
+        f"- Run: {run.id}",
+        f"- Conversation: {run.conversation_id}",
+        f"- Run source: {run_evidence['status']} from {run_evidence['agent_version']}",
+        "",
+        "## Summary",
+        summary,
+        "",
+        "## Run Evidence",
+        f"- Intent: {run_evidence['intent'] or 'unknown'} ({run_evidence['intent_confidence'] or 'n/a'})",
+        f"- Route: {run_evidence['route'] or 'unknown'}; human handoff: {run_evidence['route_needs_human']}",
+        f"- Tools: {run_evidence['failed_tool_count']} failed / {run_evidence['tool_count']} total",
+        f"- Tool errors: {_brief_join(run_evidence['tool_error_codes'])}",
+        f"- Policy codes: {_brief_join(run_evidence['policy_codes'])}",
+        f"- Citations: {run_evidence['citation_count']}",
+        f"- Retrieval sources: {_brief_join(run_evidence['retrieval_sources'])}",
+        "",
+        "## Monitor Evidence",
+        f"- Monitor events: {monitor_evidence['event_count']}",
+        f"- Failure types: {_brief_join(monitor_evidence['failure_types'])}",
+        f"- Risk levels: {_brief_join(monitor_evidence['risk_levels'])}",
+        f"- Ungrounded events: {monitor_evidence['ungrounded_events']}",
+        f"- Policy violations: {monitor_evidence['policy_violation_events']}",
+        f"- Human review events: {monitor_evidence['human_review_events']}",
+        "",
+        "## Tool Audit Evidence",
+        f"- Audit records: {tool_audit_evidence['record_count']}",
+        f"- Failed audit records: {tool_audit_evidence['failed_record_count']}",
+        f"- Tools: {_brief_join(tool_audit_evidence['tools'])}",
+        f"- Top audit errors: {_brief_join(item['error_code'] for item in tool_audit_evidence['top_error_codes'])}",
+        "",
+        "## Memory Replay",
+        f"- Included: {memory_evidence['included']}",
+        f"- Events replayed: {memory_evidence['event_count']}",
+        f"- Messages replayed: {memory_evidence['replayed_message_count']}",
+        f"- Runs replayed: {memory_evidence['replayed_run_count']}",
+        f"- Facts count: {memory_evidence['fact_count']}",
+        "",
+        "## Recommended Next Actions",
+        *[f"- {action}" for action in recommended_actions],
+        "",
+        "## Redaction Contract",
+        "- This brief excludes message content, tool arguments, tool payloads, tool error messages, retrieval body text, memory facts, and feedback comments.",
+    ]
+    return "\n".join(lines)
+
+
+def _incident_risk_label(events: list[MonitorEvent]) -> str:
+    ranks = {"critical": 0, "high": 1, "medium": 2, "low": 3}
+    labels = [_enum_value(event.risk_level) for event in events]
+    if not labels:
+        return "none"
+    return sorted(labels, key=lambda label: ranks.get(label, 9))[0]
+
+
+def _brief_join(values: Any) -> str:
+    if isinstance(values, str):
+        return values
+    items = [str(item) for item in values if item not in (None, "")]
+    return ", ".join(items) if items else "none"
+
+
+def _enum_value(value: Any) -> Any:
+    return value.value if hasattr(value, "value") else value
+
+
+def _unique_strings(values: Any) -> list[str]:
+    seen: set[str] = set()
+    result: list[str] = []
+    for value in values:
+        if value is None:
+            continue
+        item = str(_enum_value(value)).strip()
+        if not item or item in seen:
+            continue
+        seen.add(item)
+        result.append(item)
+    return result
 
 
 def _datetime_age_hours(then: datetime | None, now: datetime) -> float | None:
@@ -2507,56 +2877,34 @@ def create_app() -> FastAPI:
         if include_memory:
             require_scope(actor, "memory:replay")
 
-        run_source = "live"
-        run = deps.orchestrator.runs.get(run_id)
-        if run is None and deps.event_store:
-            run = deps.event_store.get_agent_run_trace(
-                run_id,
-                tenant_id=deps.settings.app_tenant_id,
-                limit=limit,
-            )
-            run_source = "event_store" if run else run_source
-        if run is None:
-            raise HTTPException(status_code=404, detail="Run not found")
+        return _load_incident_run_bundle(
+            deps=deps,
+            run_id=run_id,
+            include_memory=include_memory,
+            limit=limit,
+        )
 
-        monitor_source = (
-            deps.event_store.list_monitor_events(
-                tenant_id=deps.settings.app_tenant_id,
-                run_id=run_id,
-                limit=limit,
-            )
-            if deps.event_store
-            else deps.monitor.events[:limit]
+    @app.get("/api/v1/admin/incidents/runs/{run_id}/brief")
+    def incident_run_brief(
+        run_id: str,
+        deps: Annotated[AppContainer, Depends(get_container)],
+        actor: Annotated[RequestActor, Depends(get_request_actor)],
+        include_memory: Annotated[bool, Query()] = True,
+        limit: Annotated[int, Query(ge=1, le=1000)] = 500,
+    ) -> IncidentBriefResponse:
+        require_admin(actor)
+        require_scope(actor, "events:read")
+        require_scope(actor, "monitor:read")
+        require_scope(actor, "audit:read")
+        if include_memory:
+            require_scope(actor, "memory:replay")
+        bundle = _load_incident_run_bundle(
+            deps=deps,
+            run_id=run_id,
+            include_memory=include_memory,
+            limit=limit,
         )
-        monitor_events = [event for event in monitor_source if event.run_id == run_id]
-        tool_audit_records = (
-            deps.event_store.list_tool_audit_records(
-                tenant_id=deps.settings.app_tenant_id,
-                trace_id=run_id,
-                limit=limit,
-            )
-            if deps.event_store
-            else []
-        )
-        memory_replay = None
-        if include_memory and deps.event_store:
-            events = deps.event_store.list_conversation_memory_events(
-                tenant_id=deps.settings.app_tenant_id,
-                conversation_id=run.conversation_id,
-            )
-            if events:
-                try:
-                    memory_replay = replay_conversation_memory(events)
-                except ValueError as exc:
-                    raise HTTPException(status_code=422, detail=str(exc)) from exc
-
-        return IncidentRunBundle(
-            run=run,
-            run_source=run_source,
-            monitor_events=monitor_events,
-            tool_audit_records=tool_audit_records,
-            memory_replay=memory_replay,
-        )
+        return _incident_brief_response(bundle)
 
     @app.get("/api/v1/admin/runs")
     def search_agent_runs(

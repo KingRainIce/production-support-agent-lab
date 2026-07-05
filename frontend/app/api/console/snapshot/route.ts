@@ -3,6 +3,7 @@ import { agentFetch, getConsoleConnection, issueFrom } from "@/src/server/agentA
 import type {
   ConsoleSnapshot,
   EvalGateRecord,
+  IncidentBriefResponse,
   IncidentRunBundle,
   JsonRecord,
   MonitorAlert,
@@ -114,6 +115,17 @@ export async function GET(request: NextRequest) {
       knownIncidentAlertKey ??
       null;
 
+  const incidentBrief =
+    activeRunId && incident
+      ? await optional<IncidentBriefResponse>(
+          () =>
+            agentFetch(`/api/v1/admin/incidents/runs/${encodeURIComponent(activeRunId)}/brief`, {
+              query: { include_memory: true, limit: 1000 }
+            }),
+          issues
+        )
+      : null;
+
   const evalGateQuery = activeAlertKey
     ? { alert_key: activeAlertKey, limit: 5 }
     : activeRunId
@@ -159,6 +171,7 @@ export async function GET(request: NextRequest) {
     activeAlertKey,
     activeRunId,
     incident,
+    incidentBrief,
     triageMetrics,
     promotionGate,
     promotionDecisions: promotionDecisions ?? [],

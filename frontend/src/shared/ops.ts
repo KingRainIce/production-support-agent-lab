@@ -4,6 +4,7 @@ import type {
   ConsoleSnapshot,
   EvalGateRecord,
   EvalReport,
+  IncidentBriefResponse,
   KnowledgeSearchResponse,
   MonitorAlert,
   MonitorAlertDeliverySummary,
@@ -265,6 +266,16 @@ export function buildIncidentBrief(
     ...recommendedActions.map((action) => `- ${action}`)
   ].join("\n");
   return { title, summary, riskLabel, recommendedActions, markdown };
+}
+
+export function incidentBriefFromResponse(response: IncidentBriefResponse): IncidentBrief {
+  return {
+    title: response.title,
+    summary: response.summary,
+    riskLabel: response.risk_label,
+    recommendedActions: response.recommended_actions,
+    markdown: response.markdown
+  };
 }
 
 export function buildRunSearchStats(response: AgentRunSearchResponse | null): RunSearchStats {

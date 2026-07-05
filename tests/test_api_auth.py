@@ -1252,6 +1252,55 @@ def test_admin_can_read_incident_bundle_from_event_store_after_live_state_is_cle
     assert body["memory_replay"]["replayed_run_count"] == 1
 
 
+def test_admin_can_read_sanitized_incident_brief_from_event_store(tmp_path, monkeypatch):
+    monkeypatch.setenv("APP_DATABASE_URL", f"sqlite:///{tmp_path / 'events.db'}")
+    get_settings.cache_clear()
+    app_container = create_container()
+    app.dependency_overrides[get_container] = lambda: app_container
+    try:
+        client = TestClient(app)
+        session = client.post("/api/v1/chat/sessions", json={"user_id": "user_demo"}).json()
+        message = client.post(
+            "/api/v1/chat/messages",
+            json={
+                "conversation_id": session["conversation_id"],
+                "user_id": "user_demo",
+                "content": "Where is order A1002 shipping?",
+            },
+        ).json()
+        trace_id = message["trace_id"]
+        app_container.orchestrator.runs.clear()
+        app_container.monitor.events.clear()
+        app_container.memory.states.clear()
+
+        response = client.get(
+            f"/api/v1/admin/incidents/runs/{trace_id}/brief",
+            headers={"X-Demo-Role": "admin"},
+        )
+    finally:
+        app.dependency_overrides.clear()
+        get_settings.cache_clear()
+
+    assert response.status_code == 200
+    body = response.json()
+    serialized = json.dumps(body, ensure_ascii=False)
+    assert body["schema_version"] == "incident_brief.v1"
+    assert body["run_id"] == trace_id
+    assert body["run_source"] == "event_store"
+    assert body["evidence"]["run"]["tool_count"] >= 1
+    assert body["evidence"]["memory"]["included"] is True
+    assert "message_content" in body["redactions"]
+    assert "tool_payloads" in body["redactions"]
+    assert "retrieval_content" in body["redactions"]
+    assert "My private order" not in serialized
+    assert "A1002" not in serialized
+    assert "15555550123" not in serialized
+    assert "user_demo" not in serialized
+    assert "tool_results" not in serialized
+    assert body["markdown"].startswith("# PSA Lab Incident Brief")
+    assert "Recommended Next Actions" in body["markdown"]
+
+
 def test_admin_can_search_persisted_agent_runs(tmp_path, monkeypatch):
     monkeypatch.setenv("APP_DATABASE_URL", f"sqlite:///{tmp_path / 'events.db'}")
     get_settings.cache_clear()
@@ -1417,6 +1466,28 @@ def test_production_incident_bundle_requires_investigation_scopes(tmp_path, monk
                 scopes="events:read,monitor:read,audit:read,memory:replay",
             ),
         )
+        brief_missing_memory = client.get(
+            f"/api/v1/admin/incidents/runs/{trace_id}/brief",
+            headers=_production_headers(
+                user_id="incident_responder",
+                scopes="events:read,monitor:read,audit:read",
+            ),
+        )
+        brief_without_memory = client.get(
+            f"/api/v1/admin/incidents/runs/{trace_id}/brief",
+            headers=_production_headers(
+                user_id="incident_responder",
+                scopes="events:read,monitor:read,audit:read",
+            ),
+            params={"include_memory": False},
+        )
+        brief_allowed = client.get(
+            f"/api/v1/admin/incidents/runs/{trace_id}/brief",
+            headers=_production_headers(
+                user_id="incident_responder",
+                scopes="events:read,monitor:read,audit:read,memory:replay",
+            ),
+        )
     finally:
         app.dependency_overrides.clear()
         get_settings.cache_clear()
@@ -1429,6 +1500,12 @@ def test_production_incident_bundle_requires_investigation_scopes(tmp_path, monk
     assert missing_memory.json()["detail"] == "Missing required scope: memory:replay"
     assert allowed.status_code == 200
     assert allowed.json()["memory_replay"]["conversation_id"] == session["conversation_id"]
+    assert brief_missing_memory.status_code == 403
+    assert brief_missing_memory.json()["detail"] == "Missing required scope: memory:replay"
+    assert brief_without_memory.status_code == 200
+    assert brief_without_memory.json()["evidence"]["memory"]["included"] is False
+    assert brief_allowed.status_code == 200
+    assert brief_allowed.json()["schema_version"] == "incident_brief.v1"
 
 
 def test_production_gateway_identity_can_omit_body_user_id(monkeypatch):

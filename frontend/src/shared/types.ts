@@ -616,6 +616,22 @@ export type IncidentRunBundle = {
   memory_replay: MemoryReplayResult | null;
 };
 
+export type IncidentBriefResponse = {
+  schema_version: "incident_brief.v1";
+  generated_at: string;
+  title: string;
+  risk_label: string;
+  summary: string;
+  run_id: string;
+  conversation_id: string;
+  run_source: string;
+  alert_key: string | null;
+  recommended_actions: string[];
+  evidence: JsonRecord;
+  redactions: string[];
+  markdown: string;
+};
+
 export type ToolDefinition = {
   name: string;
   description: string;
@@ -639,6 +655,7 @@ export type ConsoleSnapshot = {
   activeAlertKey: string | null;
   activeRunId: string | null;
   incident: IncidentRunBundle | null;
+  incidentBrief: IncidentBriefResponse | null;
   triageMetrics: MonitorTriageMetricsResponse | null;
   promotionGate: PromotionGateResponse | null;
   promotionDecisions: PromotionDecisionRecord[];

@@ -27,6 +27,7 @@ The console should help an on-call operator or Agent beginner answer:
 | Run trace | `GET /api/v1/agent/runs/{run_id}` | Shows intent, route, retrieval, tools, spans, and LLM fallback status. |
 | Run search | `GET /api/v1/admin/runs` | Durable search over persisted run summaries. |
 | Incident bundle | `GET /api/v1/admin/incidents/runs/{run_id}?include_memory=true` | One response with run, monitor events, tool audit, and optional memory replay. |
+| Incident brief | `GET /api/v1/admin/incidents/runs/{run_id}/brief` | Backend-generated sanitized Markdown handoff for tickets or on-call notes. |
 | Tool audit | `GET /api/v1/admin/tools/audit?trace_id=...` | Durable tool facts without raw arguments or PII. |
 | Tool audit summary | `GET /api/v1/admin/tools/audit/summary?...` | Tool-level failure/SLA aggregate without raw arguments or hashes. |
 | Knowledge diagnostics | `POST /api/v1/admin/knowledge/search` | Runs the real knowledge adapter and returns safe snippets plus rewrite/stage/drop telemetry. |

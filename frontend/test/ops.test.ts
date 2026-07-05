@@ -15,6 +15,7 @@ import {
   deliveryStatusTone,
   filterAndSortAlerts,
   formatEvalStatus,
+  incidentBriefFromResponse,
   latestEvalGateRecord
 } from "../src/shared/ops";
 import type {
@@ -255,6 +256,7 @@ describe("ops workbench helpers", () => {
         tool_audit_records: [],
         memory_replay: null
       },
+      incidentBrief: null,
       triageEvents: [],
       triageMetrics: null,
       promotionGate: null,
@@ -318,6 +320,7 @@ describe("ops workbench helpers", () => {
       activeAlertKey: null,
       activeRunId: null,
       incident: null,
+      incidentBrief: null,
       triageEvents: [],
       triageMetrics: null,
       promotionGate: null,
@@ -343,6 +346,29 @@ describe("ops workbench helpers", () => {
     expect(brief.recommendedActions.join(" ")).toContain("Do not promote");
   });
 
+  it("maps backend-generated incident briefs into the existing UI card shape", () => {
+    const brief = incidentBriefFromResponse({
+      schema_version: "incident_brief.v1",
+      generated_at: "2026-07-05T00:00:00.000Z",
+      title: "TIMEOUT clustered across 1 event(s)",
+      risk_label: "P1",
+      summary: "Run run_1 handled order_status via order_agent.",
+      run_id: "run_1",
+      conversation_id: "conv_1",
+      run_source: "event_store",
+      alert_key: "agent:order:TIMEOUT",
+      recommended_actions: ["Inspect tool audit."],
+      evidence: {},
+      redactions: ["message_content"],
+      markdown: "# PSA Lab Incident Brief"
+    });
+
+    expect(brief.title).toContain("TIMEOUT");
+    expect(brief.riskLabel).toBe("P1");
+    expect(brief.recommendedActions).toEqual(["Inspect tool audit."]);
+    expect(brief.markdown).toContain("Incident Brief");
+  });
+
   it("adds promotion gate status to incident recommendations", () => {
     const snapshot = {
       health: null,
@@ -361,6 +387,7 @@ describe("ops workbench helpers", () => {
       activeAlertKey: null,
       activeRunId: null,
       incident: null,
+      incidentBrief: null,
       triageEvents: [],
       triageMetrics: null,
       promotionGate: {

@@ -49,6 +49,7 @@ import {
   deliveryStatusTone,
   filterAndSortAlerts,
   formatEvalStatus,
+  incidentBriefFromResponse,
   type AlertSort,
   type AlertStatusFilter,
   type IncidentBrief,
@@ -82,6 +83,7 @@ import type {
   EvalReport,
   EventStoreRetentionReport,
   FeedbackSearchResponse,
+  IncidentBriefResponse,
   IncidentRunBundle,
   JsonValue,
   KnowledgeSearchResponse,
@@ -437,7 +439,10 @@ export default function Home() {
   );
 
   const incidentBrief = useMemo<IncidentBrief>(
-    () => buildIncidentBrief(snapshot, activeAlert, evalReport),
+    () =>
+      snapshot?.incidentBrief
+        ? incidentBriefFromResponse(snapshot.incidentBrief)
+        : buildIncidentBrief(snapshot, activeAlert, evalReport),
     [activeAlert, evalReport, snapshot]
   );
 
@@ -1264,13 +1269,63 @@ export default function Home() {
   }
 
   async function copyIncidentBrief() {
+    setActionBusy("brief-copy");
+    setError(null);
     try {
-      await writeClipboardText(incidentBrief.markdown);
+      await writeClipboardText(await loadIncidentBriefMarkdown());
       setCopiedBrief(true);
       window.setTimeout(() => setCopiedBrief(false), 1800);
-    } catch {
-      setError("Clipboard is not available in this browser session");
+    } catch (nextError) {
+      setError(nextError instanceof Error ? nextError.message : "Clipboard is not available in this browser session");
+    } finally {
+      setActionBusy(null);
     }
+  }
+
+  async function downloadIncidentBrief() {
+    if (!snapshot) {
+      return;
+    }
+    setActionBusy("brief-download");
+    setError(null);
+    try {
+      const markdown = await loadIncidentBriefMarkdown();
+      const blob = new Blob([markdown], { type: "text/markdown;charset=utf-8" });
+      const url = URL.createObjectURL(blob);
+      const anchor = document.createElement("a");
+      anchor.href = url;
+      anchor.download = `${snapshot.activeRunId ?? "support-agent-incident-brief"}.md`;
+      document.body.appendChild(anchor);
+      anchor.click();
+      anchor.remove();
+      URL.revokeObjectURL(url);
+    } catch (nextError) {
+      setError(nextError instanceof Error ? nextError.message : "Incident brief download failed");
+    } finally {
+      setActionBusy(null);
+    }
+  }
+
+  async function loadIncidentBriefMarkdown() {
+    if (snapshot?.incidentBrief?.markdown) {
+      return snapshot.incidentBrief.markdown;
+    }
+    if (!snapshot?.activeRunId) {
+      return incidentBrief.markdown;
+    }
+    const params = new URLSearchParams({
+      runId: snapshot.activeRunId,
+      include_memory: "true",
+      limit: "1000"
+    });
+    const response = await fetch(`/api/console/incidents/brief?${params.toString()}`, {
+      cache: "no-store"
+    });
+    const data = await response.json();
+    if (!response.ok) {
+      throw new Error(data.detail ?? "Incident brief failed");
+    }
+    return (data as IncidentBriefResponse).markdown;
   }
 
   async function copyRegressionDraft() {
@@ -1885,6 +1940,7 @@ export default function Home() {
               evalReport={evalReport}
               onRunEval={() => void runStagingEvalGate()}
               onCopyBrief={() => void copyIncidentBrief()}
+              onDownloadBrief={() => void downloadIncidentBrief()}
               copiedBrief={copiedBrief}
               busy={actionBusy}
             />
@@ -4409,6 +4465,7 @@ function EvidenceContent({
   evalReport,
   onRunEval,
   onCopyBrief,
+  onDownloadBrief,
   copiedBrief,
   busy
 }: {
@@ -4427,6 +4484,7 @@ function EvidenceContent({
   evalReport: EvalReport | null;
   onRunEval: () => void;
   onCopyBrief: () => void;
+  onDownloadBrief: () => void;
   copiedBrief: boolean;
   busy: string | null;
 }) {
@@ -4441,6 +4499,7 @@ function EvidenceContent({
           evalReport={evalReport}
           onRunEval={onRunEval}
           onCopyBrief={onCopyBrief}
+          onDownloadBrief={onDownloadBrief}
           copiedBrief={copiedBrief}
           busy={busy}
         />
@@ -4458,6 +4517,7 @@ function EvidenceContent({
         evalReport={evalReport}
         onRunEval={onRunEval}
         onCopyBrief={onCopyBrief}
+        onDownloadBrief={onDownloadBrief}
         copiedBrief={copiedBrief}
         busy={busy}
       />
@@ -4502,6 +4562,7 @@ function IncidentBriefPanel({
   evalReport,
   onRunEval,
   onCopyBrief,
+  onDownloadBrief,
   copiedBrief,
   busy
 }: {
@@ -4511,6 +4572,7 @@ function IncidentBriefPanel({
   evalReport: EvalReport | null;
   onRunEval: () => void;
   onCopyBrief: () => void;
+  onDownloadBrief: () => void;
   copiedBrief: boolean;
   busy: string | null;
 }) {
@@ -4556,9 +4618,23 @@ function IncidentBriefPanel({
           <Metric label="Eval gate" value={evalGateTileLabel(evalReport, latestEvalGate)} />
         </div>
         <div className="brief-actions">
-          <button className="secondary-button" type="button" onClick={onCopyBrief} disabled={!snapshot}>
-            <Copy size={16} />
+          <button
+            className="secondary-button"
+            type="button"
+            onClick={onCopyBrief}
+            disabled={!snapshot || busy === "brief-copy"}
+          >
+            {busy === "brief-copy" ? <Loader2 className="spin" size={16} /> : <Copy size={16} />}
             {copiedBrief ? "Copied" : "Copy brief"}
+          </button>
+          <button
+            className="secondary-button"
+            type="button"
+            onClick={onDownloadBrief}
+            disabled={!snapshot || busy === "brief-download"}
+          >
+            {busy === "brief-download" ? <Loader2 className="spin" size={16} /> : <Download size={16} />}
+            Download .md
           </button>
           <button className="primary-button" type="button" onClick={onRunEval} disabled={busy === "eval"}>
             {busy === "eval" ? <Loader2 className="spin" size={16} /> : <FileCheck2 size={16} />}

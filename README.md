@@ -47,7 +47,7 @@
 - persisted run search
 - tool audit 和工具 SLA 统计
 - RAG recall diagnostics，返回安全 snippet 而不是完整文档
-- incident brief，一键复制 Markdown
+- incident brief：后端生成脱敏 Markdown，控制台可复制或下载
 - memory replay
 - response feedback workbench：读取真实 run 的好评/差评、reason 分布和用户评论，并从负反馈生成 regression draft
 - staging eval gate 和 append-only eval gate history
@@ -481,6 +481,8 @@ Eval 不只看最终回答，还检查：
 `/api/v1/admin/promotion/decisions` 会重新计算同一套 gate，并把发布决策作为 `release.promotion.decision` 事件追加保存。普通 approve 不能越过 blocked gate；如果必须 break-glass，需要显式 `override_blocked=true` 和 override reason，后续可以从控制台 Settings 或 `/api/v1/admin/events?event_type=release.promotion.decision` 审计。
 
 `/api/v1/admin/audit/export` 会导出 `application/x-ndjson`，每行是 `audit_export.v1` 摘要记录。它只包含事件类型、状态、错误码、工具名、评分、发布决策、failure/policy code 和哈希化 correlation id，不包含用户原文、反馈 comment、eval answer、工具参数或知识库正文。控制台 Settings 可以直接下载这份 NDJSON。
+
+`/api/v1/admin/incidents/runs/{run_id}/brief` 会基于同一个 incident bundle 生成 `incident_brief.v1`。它保留 run id、conversation id、intent、route、monitor failure、tool error code、citation 数量、tool audit 计数和 memory replay 计数，但不会输出用户消息原文、工具参数、工具 payload、工具错误明文、检索正文、memory facts 或反馈 comment。控制台 Brief 面板会优先使用这份后端 Markdown，并支持复制或下载 `.md`。
 
 `/metrics` 会把同一套 monitor triage 投影导出成低基数机器指标，例如 `support_agent_monitor_triage_active_alerts`、`support_agent_monitor_triage_new_events_since_triage`、`support_agent_monitor_triage_health_status{status="critical"}`、`support_agent_monitor_triage_active_alerts_by_severity{severity="P0"}` 和 `support_agent_monitor_triage_mtta_seconds`。这些适合 Prometheus alert rule；控制台仍然负责展示具体 alert、run、事件和处置备注。
 

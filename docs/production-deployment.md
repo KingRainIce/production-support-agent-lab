@@ -167,6 +167,7 @@ Admin role is not a wildcard. Production admin endpoints also require explicit m
 | `POST /api/v1/admin/knowledge/search` | `knowledge:diagnose` |
 | `GET /api/v1/admin/runs` | `events:read` |
 | `GET /api/v1/admin/incidents/runs/{run_id}` | `events:read`, `monitor:read`, `audit:read`; add `memory:replay` when `include_memory=true` |
+| `GET /api/v1/admin/incidents/runs/{run_id}/brief` | `events:read`, `monitor:read`, `audit:read`; add `memory:replay` when `include_memory=true`. Returns sanitized Markdown plus structured evidence. |
 | `/api/v1/admin/monitor/summary` | `monitor:read` |
 | `/api/v1/admin/monitor/events` | `monitor:read` |
 | `GET /api/v1/admin/monitor/drilldown` | `monitor:read` |
@@ -194,6 +195,16 @@ Admin role is not a wildcard. Production admin endpoints also require explicit m
 | `/api/v1/admin/conversations/{conversation_id}/memory/replay` | `memory:replay` |
 
 `GET /api/v1/agent/runs/{run_id}` lets the original actor inspect their own run trace. Cross-user incident review must use an admin actor with `events:read`, and the endpoint falls back to the SQLite event store when live in-process run state has been cleared.
+
+`GET /api/v1/admin/incidents/runs/{run_id}/brief` uses the same investigation
+boundary as the incident bundle, then returns `incident_brief.v1`: title,
+risk label, recommended actions, safe structured evidence, and copyable
+Markdown. It includes run id, conversation id, intent, route, monitor failure
+types, tool error codes, citation counts, tool-audit counts, and memory replay
+counts. It deliberately excludes message content, tool arguments, tool payloads,
+tool error messages, retrieval body text, memory facts, and feedback comments,
+so the result can be attached to a ticket or handoff channel without exporting
+the full customer transcript.
 
 `POST /api/v1/agent/runs/{run_id}/feedback` lets the original actor attach a positive or negative rating, normalized reason codes, and a short comment to their own persisted run. It requires `feedback:write`, appends an `agent.response.feedback` event, and does not mutate the run trace. `source=user` is the default. `source=operator` or `source=qa` requires an admin actor; cross-user feedback must use one of those non-user sources so operators do not impersonate end users. Admin review uses the feedback endpoints above with `feedback:read`.
 
