@@ -261,6 +261,7 @@ describe("ops workbench helpers", () => {
       triageMetrics: null,
       promotionGate: null,
       promotionDecisions: [],
+      operationsAutomation: null,
       monitorAlertDelivery: null,
       evalGateLatest: null,
       evalGateRecords: [],
@@ -325,6 +326,7 @@ describe("ops workbench helpers", () => {
       triageMetrics: null,
       promotionGate: null,
       promotionDecisions: [],
+      operationsAutomation: null,
       monitorAlertDelivery: null,
       evalGateLatest: latest,
       evalGateRecords: [older, failed],
@@ -444,6 +446,7 @@ describe("ops workbench helpers", () => {
         latest_eval_gate: null
       },
       promotionDecisions: [],
+      operationsAutomation: null,
       monitorAlertDelivery: null,
       evalGateLatest: null,
       evalGateRecords: [],

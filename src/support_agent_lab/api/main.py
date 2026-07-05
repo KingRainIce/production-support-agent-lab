@@ -257,6 +257,55 @@ class PromotionGateResponse(BaseModel):
     latest_eval_gate: EvalGateRecord | None = None
 
 
+class OperationsAutomationCommand(BaseModel):
+    method: Literal["GET", "POST"]
+    path: str
+    query: dict[str, Any] = Field(default_factory=dict)
+    body: dict[str, Any] = Field(default_factory=dict)
+
+
+class OperationsAutomationAction(BaseModel):
+    id: str
+    kind: Literal[
+        "dispatch_alert_deliveries",
+        "configure_alert_webhook",
+        "assign_triage_owner",
+        "retriage_recurring_alert",
+        "investigate_stale_alert",
+        "requeue_dead_delivery",
+        "generate_incident_brief",
+        "create_regression_draft",
+        "block_promotion",
+        "review_promotion_gate",
+        "run_staging_eval",
+        "inspect_tool_audit",
+        "review_feedback",
+        "run_retrieval_diagnostics",
+        "no_action_required",
+    ]
+    priority: Literal["P0", "P1", "P2", "P3"]
+    title: str
+    detail: str
+    safe_to_auto_execute: bool = False
+    required_scopes: list[str] = Field(default_factory=list)
+    command: OperationsAutomationCommand | None = None
+    evidence: dict[str, Any] = Field(default_factory=dict)
+
+
+class OperationsAutomationPlan(BaseModel):
+    schema_version: str = "ops_automation.v1"
+    generated_at: datetime
+    environment: str
+    source: Literal["event_store", "live"]
+    window_hours: int
+    health_status: Literal["ok", "degraded", "critical", "unknown"]
+    action_count: int
+    auto_executable_count: int
+    actions: list[OperationsAutomationAction]
+    evidence: dict[str, Any] = Field(default_factory=dict)
+    guardrails: list[str] = Field(default_factory=list)
+
+
 PROMOTION_DECISION_EVENT_TYPE = "release.promotion.decision"
 AUDIT_EXPORT_MEDIA_TYPE = "application/x-ndjson"
 
@@ -491,6 +540,706 @@ async def _promotion_gate_response(
         tool_audit=tool_audit,
         feedback=feedback,
         latest_eval_gate=latest_eval_gate,
+    )
+
+
+OPS_AUTOMATION_GUARDRAILS = [
+    "This endpoint is read-only; callers must execute returned commands explicitly.",
+    "Actions marked safe_to_auto_execute avoid destructive state changes, but still require scoped credentials.",
+    "Triage owner assignment, delivery requeue, release approval, and production eval execution require human review.",
+    "Generated commands never include message content, tool arguments, tool payloads, memory facts, or feedback comments.",
+]
+OPS_ACTIVE_ALERT_STATUSES = {"open", "acknowledged", "investigating"}
+OPS_PRIORITY_RANK = {"P0": 0, "P1": 1, "P2": 2, "P3": 3}
+
+
+async def _operations_automation_plan_response(
+    *,
+    deps: AppContainer,
+    actor_user_id: str,
+    source: Literal["event_store", "live"],
+    deep: bool,
+    window_hours: int,
+    limit: int,
+    stale_after_minutes: int,
+    max_active_p0p1_alerts: int,
+    max_active_alerts: int,
+    max_tool_failure_rate: float,
+    max_feedback_negative_rate: float,
+    max_eval_age_hours: int,
+    min_tool_calls: int,
+    min_feedback_count: int,
+) -> OperationsAutomationPlan:
+    promotion = await _promotion_gate_response(
+        deps=deps,
+        source=source,
+        deep=deep,
+        window_hours=window_hours,
+        max_active_p0p1_alerts=max_active_p0p1_alerts,
+        max_active_alerts=max_active_alerts,
+        max_tool_failure_rate=max_tool_failure_rate,
+        max_feedback_negative_rate=max_feedback_negative_rate,
+        max_eval_age_hours=max_eval_age_hours,
+        min_tool_calls=min_tool_calls,
+        min_feedback_count=min_feedback_count,
+    )
+    generated_at = promotion.generated_at
+    created_after = generated_at - timedelta(hours=window_hours)
+    summary = _load_monitor_summary_for_automation(
+        deps=deps,
+        source=promotion.source,
+        created_after=created_after,
+        limit=limit,
+    )
+    active_alerts = [alert for alert in summary.alerts if _ops_alert_requires_attention(alert)]
+    active_p0p1_alerts = [alert for alert in active_alerts if alert.severity in {"P0", "P1"}]
+    top_active_alert = active_alerts[0] if active_alerts else None
+    top_sample_run_id = _ops_first_sample_run_id(top_active_alert)
+    top_sample_event_id = _ops_first_sample_event_id(top_active_alert)
+    webhook_enabled = bool(_monitor_alert_webhook_url(deps))
+    delivery_summary = _safe_monitor_alert_delivery_summary(deps, limit=200)
+    dead_deliveries = _list_ops_delivery_records(deps, status=AlertDeliveryStatus.dead, limit=3)
+    actions: list[OperationsAutomationAction] = []
+
+    if active_p0p1_alerts and webhook_enabled:
+        highest = active_p0p1_alerts[0].severity
+        actions.append(
+            _ops_action(
+                kind="dispatch_alert_deliveries",
+                key=f"{promotion.source}:{highest}:{len(active_p0p1_alerts)}",
+                priority=highest,
+                title="Dispatch active P0/P1 alert deliveries",
+                detail=(
+                    f"{len(active_p0p1_alerts)} active P0/P1 alert(s) need outbound notification; "
+                    "enqueue and dispatch due webhook rows."
+                ),
+                safe_to_auto_execute=True,
+                required_scopes=["monitor:write"],
+                command=OperationsAutomationCommand(
+                    method="POST",
+                    path="/api/v1/admin/monitor/alert-deliveries/dispatch",
+                    query={"source": promotion.source, "monitor_limit": limit, "dispatch_limit": 25},
+                ),
+                evidence={
+                    "active_p0p1_alert_count": len(active_p0p1_alerts),
+                    "webhook_enabled": webhook_enabled,
+                },
+            )
+        )
+    elif active_p0p1_alerts:
+        actions.append(
+            _ops_action(
+                kind="configure_alert_webhook",
+                key=f"{promotion.source}:{len(active_p0p1_alerts)}",
+                priority=active_p0p1_alerts[0].severity,
+                title="Configure alert webhook before dispatch",
+                detail=(
+                    f"{len(active_p0p1_alerts)} active P0/P1 alert(s) exist, but webhook delivery is disabled."
+                ),
+                safe_to_auto_execute=False,
+                required_scopes=["monitor:write"],
+                evidence={
+                    "active_p0p1_alert_count": len(active_p0p1_alerts),
+                    "required_settings": [
+                        "APP_MONITOR_ALERT_WEBHOOK_ENABLED=true",
+                        "APP_MONITOR_ALERT_WEBHOOK_URL",
+                    ],
+                },
+            )
+        )
+    elif delivery_summary and webhook_enabled and (
+        delivery_summary.pending_count or delivery_summary.in_progress_count or delivery_summary.failed_count
+    ):
+        actions.append(
+            _ops_action(
+                kind="dispatch_alert_deliveries",
+                key=f"queued:{delivery_summary.pending_count}:{delivery_summary.failed_count}",
+                priority="P2",
+                title="Flush queued alert deliveries",
+                detail="Alert delivery outbox has due or previously failed rows that can be retried by the dispatcher.",
+                safe_to_auto_execute=True,
+                required_scopes=["monitor:write"],
+                command=OperationsAutomationCommand(
+                    method="POST",
+                    path="/api/v1/admin/monitor/alert-deliveries/dispatch",
+                    query={"source": promotion.source, "monitor_limit": limit, "dispatch_limit": 25},
+                ),
+                evidence=_ops_delivery_summary_evidence(delivery_summary),
+            )
+        )
+
+    unassigned_alert = next((alert for alert in active_alerts if not alert.assignee_user_id), None)
+    if unassigned_alert:
+        actions.append(
+            _ops_action(
+                kind="assign_triage_owner",
+                key=unassigned_alert.key,
+                priority=unassigned_alert.severity,
+                title="Assign an owner to the top active alert",
+                detail=f"{unassigned_alert.reason} is active and unassigned.",
+                safe_to_auto_execute=False,
+                required_scopes=["monitor:write"],
+                command=OperationsAutomationCommand(
+                    method="POST",
+                    path=f"/api/v1/admin/monitor/alerts/{unassigned_alert.key}/triage",
+                    body={
+                        "status": "investigating",
+                        "assignee_user_id": actor_user_id,
+                        "note": "Automation plan: assign current operator before mitigation.",
+                    },
+                ),
+                evidence=_ops_alert_evidence(unassigned_alert),
+            )
+        )
+
+    recurring_alert = next((alert for alert in active_alerts if alert.new_events_since_triage), None)
+    if recurring_alert:
+        actions.append(
+            _ops_action(
+                kind="retriage_recurring_alert",
+                key=recurring_alert.key,
+                priority=recurring_alert.severity,
+                title="Re-triage an alert with new evidence",
+                detail=f"{recurring_alert.reason} has new monitor events after the latest triage action.",
+                safe_to_auto_execute=False,
+                required_scopes=["monitor:write"],
+                command=OperationsAutomationCommand(
+                    method="POST",
+                    path=f"/api/v1/admin/monitor/alerts/{recurring_alert.key}/triage",
+                    body={
+                        "status": "investigating",
+                        "assignee_user_id": recurring_alert.assignee_user_id or actor_user_id,
+                        "note": "Automation plan: new monitor events arrived after triage.",
+                    },
+                ),
+                evidence=_ops_alert_evidence(recurring_alert),
+            )
+        )
+
+    stale_after = timedelta(minutes=stale_after_minutes)
+    stale_alert = next((alert for alert in active_alerts if generated_at - alert.first_seen_at >= stale_after), None)
+    if stale_alert:
+        actions.append(
+            _ops_action(
+                kind="investigate_stale_alert",
+                key=stale_alert.key,
+                priority=stale_alert.severity,
+                title="Investigate stale active alert",
+                detail=(
+                    f"{stale_alert.reason} has been active for at least {stale_after_minutes} minute(s); "
+                    "confirm customer impact and mitigation before resolving."
+                ),
+                safe_to_auto_execute=False,
+                required_scopes=["monitor:read", "events:read", "audit:read"],
+                command=OperationsAutomationCommand(
+                    method="GET",
+                    path="/api/v1/admin/monitor/drilldown",
+                    query={"source": promotion.source, "alert_key": stale_alert.key, "limit": 100},
+                ),
+                evidence=_ops_alert_evidence(stale_alert),
+            )
+        )
+
+    if dead_deliveries:
+        record = dead_deliveries[0]
+        actions.append(
+            _ops_action(
+                kind="requeue_dead_delivery",
+                key=record.id,
+                priority=record.severity,
+                title="Review and requeue dead-lettered alert delivery",
+                detail=(
+                    f"Delivery {record.id} for {record.alert_key} is dead-lettered after "
+                    f"{record.attempt_count} attempt(s)."
+                ),
+                safe_to_auto_execute=False,
+                required_scopes=["monitor:write"],
+                command=OperationsAutomationCommand(
+                    method="POST",
+                    path=f"/api/v1/admin/monitor/alert-deliveries/{record.id}/requeue",
+                    body={"note": "Automation plan: destination verified; requeue dead-letter delivery."},
+                ),
+                evidence=_ops_delivery_record_evidence(record),
+            )
+        )
+
+    if top_active_alert and top_sample_run_id:
+        actions.append(
+            _ops_action(
+                kind="generate_incident_brief",
+                key=top_sample_run_id,
+                priority=top_active_alert.severity,
+                title="Generate sanitized incident brief",
+                detail="Prepare an operator-safe incident brief for the top active alert sample run.",
+                safe_to_auto_execute=True,
+                required_scopes=["events:read", "monitor:read", "audit:read", "memory:replay"],
+                command=OperationsAutomationCommand(
+                    method="GET",
+                    path=f"/api/v1/admin/incidents/runs/{top_sample_run_id}/brief",
+                    query={"include_memory": True, "limit": 1000},
+                ),
+                evidence={
+                    "alert": _ops_alert_evidence(top_active_alert),
+                    "run_id": top_sample_run_id,
+                },
+            )
+        )
+        actions.append(
+            _ops_action(
+                kind="create_regression_draft",
+                key=top_sample_run_id,
+                priority="P2",
+                title="Draft a regression eval from the incident",
+                detail="Convert the sample run and monitor event into a redacted regression case before shipping a fix.",
+                safe_to_auto_execute=True,
+                required_scopes=["events:read", "monitor:read"],
+                command=OperationsAutomationCommand(
+                    method="POST",
+                    path="/api/v1/admin/evals/regression-drafts",
+                    body={
+                        "run_id": top_sample_run_id,
+                        "monitor_event_id": top_sample_event_id,
+                        "source": promotion.source,
+                        "limit": 1000,
+                    },
+                ),
+                evidence={
+                    "alert_key": top_active_alert.key,
+                    "run_id": top_sample_run_id,
+                    "monitor_event_id": top_sample_event_id,
+                },
+            )
+        )
+
+    if promotion.status == "blocked":
+        blocked_checks = [check for check in promotion.checks if check.status == "blocked"]
+        actions.append(
+            _ops_action(
+                kind="block_promotion",
+                key="promotion:blocked",
+                priority="P0" if active_p0p1_alerts else "P1",
+                title="Keep promotion blocked",
+                detail=f"{len(blocked_checks)} release gate check(s) are blocked; do not approve without override.",
+                safe_to_auto_execute=True,
+                required_scopes=["admin:read", "monitor:read", "audit:read", "eval:read", "feedback:read"],
+                command=_ops_promotion_gate_command(
+                    source=promotion.source,
+                    deep=deep,
+                    window_hours=window_hours,
+                    max_active_p0p1_alerts=max_active_p0p1_alerts,
+                    max_active_alerts=max_active_alerts,
+                    max_tool_failure_rate=max_tool_failure_rate,
+                    max_feedback_negative_rate=max_feedback_negative_rate,
+                    max_eval_age_hours=max_eval_age_hours,
+                    min_tool_calls=min_tool_calls,
+                    min_feedback_count=min_feedback_count,
+                ),
+                evidence={
+                    "status": promotion.status,
+                    "blocked_checks": [check.name for check in blocked_checks],
+                },
+            )
+        )
+    elif promotion.status == "warn":
+        warn_checks = [check for check in promotion.checks if check.status == "warn"]
+        actions.append(
+            _ops_action(
+                kind="review_promotion_gate",
+                key="promotion:warn",
+                priority="P2",
+                title="Review promotion warnings",
+                detail=f"{len(warn_checks)} release gate warning(s) need operator acknowledgement before approval.",
+                safe_to_auto_execute=True,
+                required_scopes=["admin:read", "monitor:read", "audit:read", "eval:read", "feedback:read"],
+                command=_ops_promotion_gate_command(
+                    source=promotion.source,
+                    deep=deep,
+                    window_hours=window_hours,
+                    max_active_p0p1_alerts=max_active_p0p1_alerts,
+                    max_active_alerts=max_active_alerts,
+                    max_tool_failure_rate=max_tool_failure_rate,
+                    max_feedback_negative_rate=max_feedback_negative_rate,
+                    max_eval_age_hours=max_eval_age_hours,
+                    min_tool_calls=min_tool_calls,
+                    min_feedback_count=min_feedback_count,
+                ),
+                evidence={
+                    "status": promotion.status,
+                    "warn_checks": [check.name for check in warn_checks],
+                },
+            )
+        )
+
+    eval_age_hours = _datetime_age_hours(
+        promotion.latest_eval_gate.completed_at if promotion.latest_eval_gate else None,
+        generated_at,
+    )
+    eval_stale = eval_age_hours is not None and eval_age_hours > max_eval_age_hours
+    eval_failed = promotion.latest_eval_gate is None or promotion.latest_eval_gate.status != "passed"
+    if eval_failed or eval_stale:
+        actions.append(
+            _ops_action(
+                kind="run_staging_eval",
+                key=f"staging:{promotion.latest_eval_gate.id if promotion.latest_eval_gate else 'missing'}",
+                priority="P1" if promotion.status == "blocked" else "P2",
+                title="Run the staging eval gate",
+                detail=(
+                    "Latest aggregate staging eval is missing, failed, errored, or stale; run this in CI/staging "
+                    "before promotion."
+                ),
+                safe_to_auto_execute=False,
+                required_scopes=["eval:run"],
+                command=OperationsAutomationCommand(
+                    method="POST",
+                    path="/api/v1/admin/evals/staging",
+                    body={
+                        "trigger": "console",
+                        "run_id": top_sample_run_id,
+                        "alert_key": top_active_alert.key if top_active_alert else None,
+                    },
+                ),
+                evidence={
+                    "latest_eval_gate_id": promotion.latest_eval_gate.id if promotion.latest_eval_gate else None,
+                    "latest_eval_status": promotion.latest_eval_gate.status if promotion.latest_eval_gate else None,
+                    "age_hours": eval_age_hours,
+                    "max_eval_age_hours": max_eval_age_hours,
+                    "production_guard": "Bundled eval routes reject production execution.",
+                },
+            )
+        )
+
+    if promotion.tool_audit.total_calls >= min_tool_calls and promotion.tool_audit.failure_rate > max_tool_failure_rate:
+        top_error = promotion.tool_audit.top_error_codes[0].error_code if promotion.tool_audit.top_error_codes else None
+        actions.append(
+            _ops_action(
+                kind="inspect_tool_audit",
+                key=f"tool:{top_error or 'failed'}",
+                priority="P1",
+                title="Inspect elevated tool failure rate",
+                detail=(
+                    f"Tool failure rate is {promotion.tool_audit.failure_rate:.1%}, above "
+                    f"{max_tool_failure_rate:.1%}."
+                ),
+                safe_to_auto_execute=True,
+                required_scopes=["audit:read"],
+                command=OperationsAutomationCommand(
+                    method="GET",
+                    path="/api/v1/admin/tools/audit",
+                    query={"status": "failed", "limit": 100, "order": "desc"},
+                ),
+                evidence={
+                    "total_calls": promotion.tool_audit.total_calls,
+                    "failed_calls": promotion.tool_audit.failed_calls,
+                    "failure_rate": promotion.tool_audit.failure_rate,
+                    "top_error_code": top_error,
+                },
+            )
+        )
+
+    if promotion.feedback.total_count >= min_feedback_count and promotion.feedback.negative_rate > max_feedback_negative_rate:
+        actions.append(
+            _ops_action(
+                kind="review_feedback",
+                key="feedback:negative",
+                priority="P2",
+                title="Review negative feedback cluster",
+                detail=(
+                    f"Negative feedback rate is {promotion.feedback.negative_rate:.1%}, above "
+                    f"{max_feedback_negative_rate:.1%}."
+                ),
+                safe_to_auto_execute=True,
+                required_scopes=["feedback:read"],
+                command=OperationsAutomationCommand(
+                    method="GET",
+                    path="/api/v1/admin/feedback",
+                    query={"rating": "negative", "limit": 100, "order": "desc"},
+                ),
+                evidence={
+                    "total_count": promotion.feedback.total_count,
+                    "negative_count": promotion.feedback.negative_count,
+                    "negative_rate": promotion.feedback.negative_rate,
+                    "top_reasons": [
+                        reason.model_dump(mode="json") for reason in promotion.feedback.counts_by_reason[:5]
+                    ],
+                },
+            )
+        )
+
+    if summary.total_events and summary.grounded_rate < 0.95:
+        query = top_active_alert.reason if top_active_alert else next(iter(summary.by_failure_type), "retrieval coverage")
+        actions.append(
+            _ops_action(
+                kind="run_retrieval_diagnostics",
+                key=f"retrieval:{query}",
+                priority="P2",
+                title="Run retrieval diagnostics for weak grounding",
+                detail=f"Grounded rate is {summary.grounded_rate:.1%}; inspect recall and selected sources.",
+                safe_to_auto_execute=True,
+                required_scopes=["knowledge:diagnose"],
+                command=OperationsAutomationCommand(
+                    method="POST",
+                    path="/api/v1/admin/knowledge/search",
+                    body={"query": query, "limit": 6, "snippet_chars": 300},
+                ),
+                evidence={
+                    "grounded_rate": summary.grounded_rate,
+                    "total_events": summary.total_events,
+                    "query_seed": query,
+                },
+            )
+        )
+
+    if not actions:
+        actions.append(
+            _ops_action(
+                kind="no_action_required",
+                key=f"{promotion.source}:{window_hours}",
+                priority="P3",
+                title="No immediate automation action required",
+                detail="Monitor, delivery, feedback, tool audit, and eval signals are within configured thresholds.",
+                safe_to_auto_execute=True,
+                required_scopes=[],
+                evidence={
+                    "promotion_status": promotion.status,
+                    "health_status": promotion.monitor.health_status,
+                },
+            )
+        )
+
+    actions = _sort_ops_actions(actions)
+    evidence = {
+        "monitor": {
+            "total_events": summary.total_events,
+            "alert_count": len(summary.alerts),
+            "active_alert_count": len(active_alerts),
+            "active_p0p1_alert_count": len(active_p0p1_alerts),
+            "grounded_rate": summary.grounded_rate,
+            "policy_compliance_rate": summary.policy_compliance_rate,
+            "human_review_rate": summary.human_review_rate,
+            "top_active_alert": _ops_alert_evidence(top_active_alert) if top_active_alert else None,
+        },
+        "triage": {
+            "health_status": promotion.monitor.health_status,
+            "new_events_since_triage_count": promotion.monitor.new_events_since_triage_count,
+            "stale_active_alert_count": promotion.monitor.stale_active_alert_count,
+            "unassigned_active_alert_count": promotion.monitor.unassigned_active_alert_count,
+        },
+        "alert_delivery": _ops_delivery_summary_evidence(delivery_summary) if delivery_summary else None,
+        "promotion_gate": {
+            "status": promotion.status,
+            "checks": [
+                {"name": check.name, "status": check.status, "detail": check.detail}
+                for check in promotion.checks
+            ],
+        },
+        "tool_audit": {
+            "total_calls": promotion.tool_audit.total_calls,
+            "failed_calls": promotion.tool_audit.failed_calls,
+            "failure_rate": promotion.tool_audit.failure_rate,
+        },
+        "feedback": {
+            "total_count": promotion.feedback.total_count,
+            "negative_count": promotion.feedback.negative_count,
+            "negative_rate": promotion.feedback.negative_rate,
+        },
+        "latest_eval_gate": {
+            "id": promotion.latest_eval_gate.id if promotion.latest_eval_gate else None,
+            "status": promotion.latest_eval_gate.status if promotion.latest_eval_gate else None,
+            "age_hours": eval_age_hours,
+        },
+    }
+    return OperationsAutomationPlan(
+        generated_at=generated_at,
+        environment=deps.settings.app_env,
+        source=promotion.source,
+        window_hours=window_hours,
+        health_status=promotion.monitor.health_status,
+        action_count=len(actions),
+        auto_executable_count=sum(1 for action in actions if action.safe_to_auto_execute),
+        actions=actions,
+        evidence=evidence,
+        guardrails=OPS_AUTOMATION_GUARDRAILS,
+    )
+
+
+def _ops_action(
+    *,
+    kind: OperationsAutomationAction.model_fields["kind"].annotation,
+    key: str,
+    priority: Literal["P0", "P1", "P2", "P3"],
+    title: str,
+    detail: str,
+    safe_to_auto_execute: bool,
+    required_scopes: list[str],
+    command: OperationsAutomationCommand | None = None,
+    evidence: dict[str, Any] | None = None,
+) -> OperationsAutomationAction:
+    return OperationsAutomationAction(
+        id=_ops_action_id(str(kind), key),
+        kind=kind,
+        priority=priority,
+        title=title,
+        detail=detail,
+        safe_to_auto_execute=safe_to_auto_execute,
+        required_scopes=required_scopes,
+        command=command,
+        evidence=evidence or {},
+    )
+
+
+def _ops_action_id(kind: str, key: str) -> str:
+    digest = hashlib.sha256(f"{kind}:{key}".encode("utf-8")).hexdigest()[:10]
+    return f"ops_{kind}_{digest}"
+
+
+def _sort_ops_actions(actions: list[OperationsAutomationAction]) -> list[OperationsAutomationAction]:
+    return sorted(
+        actions,
+        key=lambda action: (
+            OPS_PRIORITY_RANK.get(action.priority, 9),
+            0 if action.safe_to_auto_execute else 1,
+            action.kind,
+            action.id,
+        ),
+    )
+
+
+def _load_monitor_summary_for_automation(
+    *,
+    deps: AppContainer,
+    source: Literal["event_store", "live"],
+    created_after: datetime,
+    limit: int,
+) -> MonitorSummary:
+    if source == "event_store" and deps.event_store:
+        events = deps.event_store.list_monitor_events(
+            tenant_id=deps.settings.app_tenant_id,
+            created_after=created_after.isoformat(),
+            limit=limit,
+            order="desc",
+        )
+        triage_events = deps.event_store.list_monitor_alert_triage_events(
+            tenant_id=deps.settings.app_tenant_id,
+            limit=500,
+        )
+        return summarize_monitor_events(events, triage_events=triage_events)
+    events = [event for event in deps.monitor.events if event.timestamp >= created_after]
+    events = sorted(events, key=lambda event: event.timestamp, reverse=True)[:limit]
+    return summarize_monitor_events(events)
+
+
+def _safe_monitor_alert_delivery_summary(deps: AppContainer, limit: int) -> AlertDeliverySummary | None:
+    if not deps.event_store:
+        return None
+    return _monitor_alert_delivery_summary(deps, limit=limit)
+
+
+def _list_ops_delivery_records(
+    deps: AppContainer,
+    *,
+    status: AlertDeliveryStatus,
+    limit: int,
+) -> list[AlertDeliveryRecord]:
+    if not deps.event_store:
+        return []
+    return deps.event_store.list_alert_delivery_records(
+        tenant_id=deps.settings.app_tenant_id,
+        statuses=[status.value],
+        limit=limit,
+        order="desc",
+    )
+
+
+def _ops_alert_requires_attention(alert: MonitorAlert) -> bool:
+    return _enum_value(alert.status) in OPS_ACTIVE_ALERT_STATUSES or alert.new_events_since_triage
+
+
+def _ops_first_sample_run_id(alert: MonitorAlert | None) -> str | None:
+    if not alert:
+        return None
+    return alert.sample_run_ids[0] if alert.sample_run_ids else None
+
+
+def _ops_first_sample_event_id(alert: MonitorAlert | None) -> str | None:
+    if not alert:
+        return None
+    return alert.sample_event_ids[0] if alert.sample_event_ids else None
+
+
+def _ops_alert_evidence(alert: MonitorAlert) -> dict[str, Any]:
+    return {
+        "key": alert.key,
+        "severity": alert.severity,
+        "status": _enum_value(alert.status),
+        "count": alert.count,
+        "reason": alert.reason,
+        "assignee_user_id": alert.assignee_user_id,
+        "new_events_since_triage": alert.new_events_since_triage,
+        "first_seen_at": alert.first_seen_at,
+        "last_seen_at": alert.last_seen_at,
+        "sample_run_ids": alert.sample_run_ids[:3],
+        "sample_event_ids": alert.sample_event_ids[:3],
+    }
+
+
+def _ops_delivery_summary_evidence(summary: AlertDeliverySummary) -> dict[str, Any]:
+    return {
+        "status": summary.status,
+        "webhook_enabled": summary.webhook_enabled,
+        "pending_count": summary.pending_count,
+        "in_progress_count": summary.in_progress_count,
+        "failed_count": summary.failed_count,
+        "dead_count": summary.dead_count,
+        "oldest_pending_at": summary.oldest_pending_at,
+        "next_attempt_at": summary.next_attempt_at,
+        "last_attempt_at": summary.last_attempt_at,
+        "last_success_at": summary.last_success_at,
+        "last_error": summary.last_error,
+    }
+
+
+def _ops_delivery_record_evidence(record: AlertDeliveryRecord) -> dict[str, Any]:
+    return {
+        "id": record.id,
+        "alert_key": record.alert_key,
+        "severity": record.severity,
+        "status": _enum_value(record.status),
+        "attempt_count": record.attempt_count,
+        "last_attempt_at": record.last_attempt_at,
+        "dead_lettered_at": record.dead_lettered_at,
+        "response_status_code": record.response_status_code,
+        "last_error": record.last_error,
+    }
+
+
+def _ops_promotion_gate_command(
+    *,
+    source: Literal["event_store", "live"],
+    deep: bool,
+    window_hours: int,
+    max_active_p0p1_alerts: int,
+    max_active_alerts: int,
+    max_tool_failure_rate: float,
+    max_feedback_negative_rate: float,
+    max_eval_age_hours: int,
+    min_tool_calls: int,
+    min_feedback_count: int,
+) -> OperationsAutomationCommand:
+    return OperationsAutomationCommand(
+        method="GET",
+        path="/api/v1/admin/promotion/gate",
+        query={
+            "source": source,
+            "deep": deep,
+            "window_hours": window_hours,
+            "max_active_p0p1_alerts": max_active_p0p1_alerts,
+            "max_active_alerts": max_active_alerts,
+            "max_tool_failure_rate": max_tool_failure_rate,
+            "max_feedback_negative_rate": max_feedback_negative_rate,
+            "max_eval_age_hours": max_eval_age_hours,
+            "min_tool_calls": min_tool_calls,
+            "min_feedback_count": min_feedback_count,
+        },
     )
 
 
@@ -2401,6 +3150,47 @@ def create_app() -> FastAPI:
             source=source,
             deep=deep,
             window_hours=window_hours,
+            max_active_p0p1_alerts=max_active_p0p1_alerts,
+            max_active_alerts=max_active_alerts,
+            max_tool_failure_rate=max_tool_failure_rate,
+            max_feedback_negative_rate=max_feedback_negative_rate,
+            max_eval_age_hours=max_eval_age_hours,
+            min_tool_calls=min_tool_calls,
+            min_feedback_count=min_feedback_count,
+        )
+
+    @app.get("/api/v1/admin/operations/automation-plan")
+    async def operations_automation_plan(
+        deps: Annotated[AppContainer, Depends(get_container)],
+        actor: Annotated[RequestActor, Depends(get_request_actor)],
+        source: Annotated[Literal["event_store", "live"], Query()] = "event_store",
+        deep: Annotated[bool, Query()] = False,
+        window_hours: Annotated[int, Query(ge=1, le=168)] = 24,
+        limit: Annotated[int, Query(ge=1, le=1000)] = 500,
+        stale_after_minutes: Annotated[int, Query(ge=1, le=1440)] = 60,
+        max_active_p0p1_alerts: Annotated[int, Query(ge=0, le=100)] = 0,
+        max_active_alerts: Annotated[int, Query(ge=0, le=1000)] = 10,
+        max_tool_failure_rate: Annotated[float, Query(ge=0, le=1)] = 0.05,
+        max_feedback_negative_rate: Annotated[float, Query(ge=0, le=1)] = 0.4,
+        max_eval_age_hours: Annotated[int, Query(ge=1, le=720)] = 24,
+        min_tool_calls: Annotated[int, Query(ge=0, le=10000)] = 1,
+        min_feedback_count: Annotated[int, Query(ge=0, le=10000)] = 5,
+    ) -> OperationsAutomationPlan:
+        require_admin(actor)
+        require_scope(actor, "admin:read")
+        require_scope(actor, "monitor:read")
+        require_scope(actor, "audit:read")
+        require_scope(actor, "events:read")
+        require_scope(actor, "eval:read")
+        require_scope(actor, "feedback:read")
+        return await _operations_automation_plan_response(
+            deps=deps,
+            actor_user_id=actor.user_id,
+            source=source,
+            deep=deep,
+            window_hours=window_hours,
+            limit=limit,
+            stale_after_minutes=stale_after_minutes,
             max_active_p0p1_alerts=max_active_p0p1_alerts,
             max_active_alerts=max_active_alerts,
             max_tool_failure_rate=max_tool_failure_rate,

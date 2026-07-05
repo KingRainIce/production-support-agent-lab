@@ -91,6 +91,8 @@ import type {
   MonitorAlert,
   MonitorDrilldownResponse,
   MonitorEvent,
+  OperationsAutomationAction,
+  OperationsAutomationPlan,
   PolicyFinding,
   PromotionDecision,
   PromotionDecisionRecord,
@@ -1678,6 +1680,7 @@ export default function Home() {
               retentionReport={eventRetentionReport}
               promotionGate={snapshot?.promotionGate ?? null}
               promotionDecisions={snapshot?.promotionDecisions ?? []}
+              operationsAutomation={snapshot?.operationsAutomation ?? null}
               busy={eventOpsBusy}
               error={eventOpsError}
               promotionTargetVersion={promotionTargetVersion}
@@ -2739,6 +2742,7 @@ function SettingsWorkbenchPanel({
   retentionReport,
   promotionGate,
   promotionDecisions,
+  operationsAutomation,
   busy,
   error,
   promotionTargetVersion,
@@ -2784,6 +2788,7 @@ function SettingsWorkbenchPanel({
   retentionReport: EventStoreRetentionReport | null;
   promotionGate: PromotionGateResponse | null;
   promotionDecisions: PromotionDecisionRecord[];
+  operationsAutomation: OperationsAutomationPlan | null;
   busy: string | null;
   error: string | null;
   promotionTargetVersion: string;
@@ -2831,6 +2836,8 @@ function SettingsWorkbenchPanel({
   const auditExportBusy = busy === "audit-export";
   const canApply = backupReport?.verified === true && previewReady && applyConfirmed;
   const promotionStats = buildPromotionGateStats(promotionGate);
+  const automationTone = automationPlanTone(operationsAutomation);
+  const automationActions = operationsAutomation?.actions ?? [];
   return (
     <aside className="alerts-panel run-workbench settings-workbench">
       <div className="panel-heading">
@@ -2885,6 +2892,63 @@ function SettingsWorkbenchPanel({
           </>
         ) : (
           <PanelEmpty title="Preflight unavailable" detail="Check admin scopes or the Agent API connection." />
+        )}
+      </section>
+
+      <section className={`settings-section automation-plan-section state-${automationTone}`}>
+        <div className="settings-section-head">
+          <strong>Operations Automation</strong>
+          <Badge tone={automationTone}>
+            {operationsAutomation ? operationsAutomation.health_status : "unavailable"}
+          </Badge>
+        </div>
+        <div className="run-search-stats event-op-stats automation-plan-stats">
+          <Metric label="Actions" value={operationsAutomation ? String(operationsAutomation.action_count) : "n/a"} />
+          <Metric
+            label="Auto-safe"
+            value={operationsAutomation ? String(operationsAutomation.auto_executable_count) : "n/a"}
+          />
+          <Metric label="Window" value={operationsAutomation ? `${operationsAutomation.window_hours}h` : "n/a"} />
+          <Metric label="Source" value={operationsAutomation?.source ?? "n/a"} />
+        </div>
+        {operationsAutomation ? (
+          <>
+            <div className="preflight-meta">
+              <span>{operationsAutomation.environment}</span>
+              <span>{formatTime(operationsAutomation.generated_at)}</span>
+              {operationsAutomation.guardrails.slice(0, 2).map((guardrail) => (
+                <span key={guardrail}>{guardrail}</span>
+              ))}
+            </div>
+            <div className="automation-action-list">
+              {automationActions.slice(0, 6).map((action) => (
+                <div className={`automation-action-row state-${automationActionTone(action)}`} key={action.id}>
+                  <div className="automation-action-copy">
+                    <div className="automation-action-title">
+                      <Badge tone={automationPriorityTone(action.priority)}>{action.priority}</Badge>
+                      <strong>{action.title}</strong>
+                    </div>
+                    <span>{action.detail}</span>
+                    {action.command ? (
+                      <code>
+                        {action.command.method} {action.command.path}
+                      </code>
+                    ) : null}
+                  </div>
+                  <div className="automation-action-meta">
+                    <Badge tone={action.safe_to_auto_execute ? "success" : "warn"}>
+                      {action.safe_to_auto_execute ? "auto-safe" : "manual"}
+                    </Badge>
+                    {action.required_scopes.slice(0, 3).map((scope) => (
+                      <span key={scope}>{scope}</span>
+                    ))}
+                  </div>
+                </div>
+              ))}
+            </div>
+          </>
+        ) : (
+          <PanelEmpty title="Automation unavailable" detail="Check admin scopes or the Agent API connection." />
         )}
       </section>
 
@@ -5520,6 +5584,41 @@ function promotionDecisionBadgeTone(decision: PromotionDecision): "neutral" | "s
     return "danger";
   }
   return "warn";
+}
+
+function automationPlanTone(plan: OperationsAutomationPlan | null): "neutral" | "success" | "warn" | "danger" {
+  if (!plan) {
+    return "neutral";
+  }
+  if (plan.health_status === "critical") {
+    return "danger";
+  }
+  if (plan.health_status === "degraded") {
+    return "warn";
+  }
+  return plan.action_count > 0 && !plan.actions.some((action) => action.kind === "no_action_required")
+    ? "warn"
+    : "success";
+}
+
+function automationPriorityTone(priority: OperationsAutomationAction["priority"]): "neutral" | "success" | "warn" | "danger" {
+  if (priority === "P0") {
+    return "danger";
+  }
+  if (priority === "P1") {
+    return "warn";
+  }
+  return priority === "P2" ? "neutral" : "success";
+}
+
+function automationActionTone(action: OperationsAutomationAction): "neutral" | "success" | "warn" | "danger" {
+  if (action.priority === "P0") {
+    return "danger";
+  }
+  if (action.priority === "P1" || !action.safe_to_auto_execute) {
+    return "warn";
+  }
+  return action.kind === "no_action_required" ? "success" : "neutral";
 }
 
 function promotionGateTileClass(status: "passed" | "warn" | "blocked" | null) {

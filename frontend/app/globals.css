@@ -1130,6 +1130,115 @@ textarea:disabled {
   grid-column: 1 / -1;
 }
 
+.automation-plan-section {
+  border-left: 4px solid var(--blue);
+}
+
+.automation-plan-section.state-success {
+  border-left-color: var(--green-700);
+}
+
+.automation-plan-section.state-warn {
+  border-left-color: var(--orange);
+}
+
+.automation-plan-section.state-danger {
+  border-left-color: var(--red);
+}
+
+.automation-plan-stats {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
+.automation-action-list {
+  display: grid;
+  gap: 7px;
+}
+
+.automation-action-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+  border: 1px solid var(--line);
+  border-left: 4px solid #94a3b8;
+  border-radius: 8px;
+  background: #f8faf9;
+  padding: 8px;
+  min-width: 0;
+}
+
+.automation-action-row.state-success {
+  border-left-color: var(--green-700);
+}
+
+.automation-action-row.state-warn {
+  border-left-color: var(--orange);
+}
+
+.automation-action-row.state-danger {
+  border-left-color: var(--red);
+}
+
+.automation-action-copy,
+.automation-action-title,
+.automation-action-meta {
+  min-width: 0;
+}
+
+.automation-action-copy {
+  display: grid;
+  gap: 5px;
+}
+
+.automation-action-title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.automation-action-title strong,
+.automation-action-copy span,
+.automation-action-copy code,
+.automation-action-meta span {
+  overflow-wrap: anywhere;
+}
+
+.automation-action-title strong {
+  color: #17231e;
+  font-size: 12px;
+}
+
+.automation-action-copy span {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 1.35;
+}
+
+.automation-action-copy code {
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: white;
+  color: var(--green-800);
+  padding: 5px 6px;
+  font-size: 11px;
+  font-weight: 800;
+  line-height: 1.4;
+}
+
+.automation-action-meta {
+  display: grid;
+  gap: 4px;
+  justify-items: end;
+  align-content: start;
+}
+
+.automation-action-meta span {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 800;
+}
+
 .promotion-decision-section {
   border-left: 4px solid var(--blue);
 }
@@ -2736,7 +2845,9 @@ textarea {
   .settings-command-row,
   .settings-check-grid,
   .promotion-override-grid,
-  .promotion-decision-row {
+  .promotion-decision-row,
+  .automation-action-row,
+  .automation-plan-stats {
     grid-template-columns: 1fr;
   }
 
@@ -2758,6 +2869,10 @@ textarea {
   }
 
   .promotion-decision-meta {
+    justify-items: start;
+  }
+
+  .automation-action-meta {
     justify-items: start;
   }
 

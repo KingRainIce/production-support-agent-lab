@@ -189,6 +189,7 @@ Admin role is not a wildcard. Production admin endpoints also require explicit m
 | `GET /api/v1/admin/feedback` | `feedback:read` |
 | `GET /api/v1/admin/feedback/summary` | `feedback:read` |
 | `GET /api/v1/admin/promotion/gate` | `admin:read`, `monitor:read`, `audit:read`, `eval:read`, `feedback:read`. Read-only release preflight. |
+| `GET /api/v1/admin/operations/automation-plan` | `admin:read`, `monitor:read`, `audit:read`, `events:read`, `eval:read`, `feedback:read`. Read-only next-action plan with runnable commands and guardrails. |
 | `GET /api/v1/admin/promotion/decisions` | `admin:read`, `audit:read` |
 | `POST /api/v1/admin/promotion/decisions` | `admin:write`, `admin:read`, `monitor:read`, `audit:read`, `eval:read`, `feedback:read`. Recomputes the release preflight and writes an append-only decision event. |
 | `GET /api/v1/admin/audit/export` | `audit:read`, `events:read`. Returns sanitized `application/x-ndjson` for SIEM or warehouse ingestion. |
@@ -223,6 +224,18 @@ or `blocked` plus threshold evidence for each check. High feedback negative
 rate blocks promotion, while thin feedback volume warns reviewers that the
 online signal is not yet strong. It never runs bundled evals, writes triage
 events, or returns raw tool arguments, raw monitor events, or eval answer text.
+
+`GET /api/v1/admin/operations/automation-plan` is the read-only production
+next-action planner used by the console `Settings` workbench and external
+automation. It reuses the promotion gate window, then adds active alert
+pressure, webhook/outbox health, dead-letter deliveries, incident-brief and
+regression-draft opportunities, tool-audit failure rate, negative feedback,
+retrieval grounding, and staging-eval freshness. The response schema is
+`ops_automation.v1`. Each action includes priority, detail, `safe_to_auto_execute`,
+required scopes, an optional method/path/query/body command, evidence, and
+guardrails. The endpoint itself never dispatches webhooks, changes triage,
+requeues deliveries, records release decisions, or runs evals; a cron job or
+on-call bot must explicitly call a returned command with the listed scope.
 
 `POST /api/v1/admin/promotion/decisions` is the mutable release audit action.
 It recalculates the promotion gate, stores the resulting gate snapshot with the

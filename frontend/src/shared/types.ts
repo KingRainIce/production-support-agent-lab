@@ -496,6 +496,54 @@ export type PromotionDecisionRecord = {
   created_at: string;
 };
 
+export type OperationsAutomationCommand = {
+  method: "GET" | "POST";
+  path: string;
+  query: JsonRecord;
+  body: JsonRecord;
+};
+
+export type OperationsAutomationAction = {
+  id: string;
+  kind:
+    | "dispatch_alert_deliveries"
+    | "configure_alert_webhook"
+    | "assign_triage_owner"
+    | "retriage_recurring_alert"
+    | "investigate_stale_alert"
+    | "requeue_dead_delivery"
+    | "generate_incident_brief"
+    | "create_regression_draft"
+    | "block_promotion"
+    | "review_promotion_gate"
+    | "run_staging_eval"
+    | "inspect_tool_audit"
+    | "review_feedback"
+    | "run_retrieval_diagnostics"
+    | "no_action_required";
+  priority: "P0" | "P1" | "P2" | "P3";
+  title: string;
+  detail: string;
+  safe_to_auto_execute: boolean;
+  required_scopes: string[];
+  command: OperationsAutomationCommand | null;
+  evidence: JsonRecord;
+};
+
+export type OperationsAutomationPlan = {
+  schema_version: "ops_automation.v1";
+  generated_at: string;
+  environment: string;
+  source: "event_store" | "live";
+  window_hours: number;
+  health_status: "ok" | "degraded" | "critical" | "unknown";
+  action_count: number;
+  auto_executable_count: number;
+  actions: OperationsAutomationAction[];
+  evidence: JsonRecord;
+  guardrails: string[];
+};
+
 export type MonitorAlertDeliverySummary = {
   status: "ok" | "queued" | "degraded" | "failed" | "disabled" | "unknown";
   webhook_enabled: boolean;
@@ -659,6 +707,7 @@ export type ConsoleSnapshot = {
   triageMetrics: MonitorTriageMetricsResponse | null;
   promotionGate: PromotionGateResponse | null;
   promotionDecisions: PromotionDecisionRecord[];
+  operationsAutomation: OperationsAutomationPlan | null;
   monitorAlertDelivery: MonitorAlertDeliverySummary | null;
   triageEvents: MonitorAlertTriageEvent[];
   evalGateLatest: EvalGateRecord | null;

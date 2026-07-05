@@ -78,7 +78,10 @@ real local FastAPI endpoints:
 17. `GET /api/v1/admin/promotion/decisions` and
    `POST /api/v1/admin/promotion/decisions` when `Settings` shows or records
    append-only release decisions tied to a fresh promotion-gate snapshot.
-18. `GET /api/v1/admin/audit/export` when `Settings` downloads sanitized
+18. `GET /api/v1/admin/operations/automation-plan` when `Settings` shows the
+   read-only next-action queue for monitor, delivery, release, eval, feedback,
+   tool-audit, and retrieval follow-up.
+19. `GET /api/v1/admin/audit/export` when `Settings` downloads sanitized
    NDJSON for SIEM or warehouse ingestion.
 
 ## Production Run
@@ -166,6 +169,12 @@ machine.
   backups through a label-only BFF call, previews retention, and only enables
   apply after a verified backup, a dry-run report, and operator confirmation.
   The browser never sends filesystem paths to the backend.
+- Operations Automation in `Settings` uses `GET /api/v1/admin/operations/automation-plan`
+  to show prioritized actions with command method/path, required scopes, and
+  whether an external runner may safely auto-execute them. The plan is read-only:
+  it can recommend dispatching alert deliveries, generating an incident brief,
+  drafting a regression eval, or keeping promotion blocked, but it never mutates
+  triage, delivery, eval, or release state by itself.
 - Queue workbench controls for severity, status, search, new-event filtering,
   and severity/newest/count sorting.
 - Shareable investigation URLs for `runId`, `alertKey`, active workspace,
@@ -197,6 +206,11 @@ machine.
   tool audit failure rate, feedback negative rate, and the latest aggregate
   staging eval gate. It returns `passed`, `warn`, or `blocked` with evidence
   for each check; it does not run evals or change alert triage state.
+- Operations automation plan via `GET /api/v1/admin/operations/automation-plan`.
+  It combines the same production evidence with alert delivery, incident brief,
+  regression-draft, retrieval, and staging-eval recommendations. Each action
+  returns a runnable backend command plus scopes and guardrails, so teams can
+  connect cron or an on-call bot without inventing a separate rules engine.
 - Promotion decisions via `POST /api/v1/admin/promotion/decisions`. The backend
   recomputes the gate, stores the decision and gate snapshot as
   `release.promotion.decision`, and rejects non-override approval while the gate

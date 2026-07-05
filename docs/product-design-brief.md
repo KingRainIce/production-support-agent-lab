@@ -17,6 +17,8 @@ The console should help an on-call operator or Agent beginner answer:
 - Which monitor events sit behind this alert, and do they cluster by failure
   type, intent, risk level, grounding, policy status, or human-review pressure?
 - Which regression file should receive the real failure sample?
+- Which operation should happen next, and is it safe for a cron/on-call bot to
+  execute automatically?
 - Has someone acknowledged, investigated, or resolved a monitor alert?
 - Did proactive alert delivery fail, and should a dead-letter row be replayed or closed?
 
@@ -36,6 +38,7 @@ The console should help an on-call operator or Agent beginner answer:
 | Monitor drilldown | `GET /api/v1/admin/monitor/drilldown?source=event_store&alert_key=...` | Event-level alert investigation with failure, intent, and risk buckets. |
 | Alert delivery ledger | `GET /api/v1/admin/monitor/alert-deliveries`; `POST .../{delivery_id}/requeue`; `POST .../{delivery_id}/close` | Durable webhook outbox handling with operator replay/close for dead-letter rows. |
 | Alert triage | `GET/POST /api/v1/admin/monitor/alerts/{alert_key}/triage` | Append-only ack/investigate/resolve workflow. |
+| Operations automation | `GET /api/v1/admin/operations/automation-plan` | Prioritized next-action plan with runnable commands, scopes, guardrails, and auto-execution safety labels. |
 | Event log | `GET /api/v1/admin/events?conversation_id=...` | Auditable event stream for messages, runs, monitor, and triage. |
 | Memory replay | `GET /api/v1/admin/conversations/{conversation_id}/memory/replay` | Rebuilds conversation facts after restart. |
 

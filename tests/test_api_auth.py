@@ -3193,6 +3193,110 @@ def test_admin_promotion_gate_blocks_without_latest_staging_eval_gate(tmp_path, 
     assert "No aggregate staging eval gate" in checks["staging_eval_gate"]["detail"]
 
 
+def test_admin_operations_automation_plan_recommends_actions_from_persisted_evidence(tmp_path, monkeypatch):
+    monkeypatch.setenv("APP_DATABASE_URL", f"sqlite:///{tmp_path / 'events.db'}")
+    get_settings.cache_clear()
+    app_container = create_container()
+    event_store = app_container.event_store
+    assert event_store is not None
+    app.dependency_overrides[get_container] = lambda: app_container
+    try:
+        client = TestClient(app)
+        customer_headers = {"X-Demo-User": "customer_sensitive"}
+        session = client.post(
+            "/api/v1/chat/sessions",
+            headers=customer_headers,
+            json={"user_id": "customer_sensitive"},
+        ).json()
+        message = client.post(
+            "/api/v1/chat/messages",
+            headers=customer_headers,
+            json={
+                "conversation_id": session["conversation_id"],
+                "user_id": "customer_sensitive",
+                "content": "Where is order A1002 shipping?",
+            },
+        ).json()
+        trace_id = message["trace_id"]
+        monitor_event = MonitorEvent(
+            conversation_id=session["conversation_id"],
+            run_id=trace_id,
+            agent_version="agent_test",
+            user_intent=IntentType.order_status,
+            risk_level=RiskLevel.high,
+            grounded=False,
+            policy_compliant=False,
+            needs_human_review=True,
+            failure_types=["TIMEOUT"],
+            summary="sanitized timeout monitor event",
+        )
+        event_store.append_monitor_event(
+            monitor_event,
+            tenant_id=app_container.settings.app_tenant_id,
+        )
+        alert = MonitorAlert(
+            severity="P1",
+            key=monitor_alert_key(monitor_event),
+            count=1,
+            reason="TIMEOUT clustered across 1 event(s)",
+            first_seen_at=monitor_event.timestamp,
+            last_seen_at=monitor_event.timestamp,
+            sample_event_ids=[monitor_event.id],
+            sample_run_ids=[trace_id],
+        )
+        delivery_record, _ = event_store.enqueue_alert_delivery(
+            build_alert_delivery_record(
+                tenant_id=app_container.settings.app_tenant_id,
+                alert=alert,
+                destination_hash=hash_alert_destination("https://hooks.internal.test/alerts"),
+            )
+        )
+        event_store.record_alert_delivery_attempt(
+            delivery_record.id,
+            status=AlertDeliveryStatus.failed,
+            response_status_code=503,
+            last_error="HTTP_503",
+            max_attempts=1,
+            backoff_seconds=60,
+        )
+
+        response = client.get(
+            "/api/v1/admin/operations/automation-plan",
+            headers={"X-Demo-Role": "admin", "X-Demo-User": "operator_admin"},
+            params={"source": "event_store", "min_tool_calls": 0, "min_feedback_count": 0},
+        )
+    finally:
+        app.dependency_overrides.clear()
+        get_settings.cache_clear()
+
+    assert response.status_code == 200
+    body = response.json()
+    serialized = json.dumps(body, ensure_ascii=False)
+    kinds = {action["kind"] for action in body["actions"]}
+    actions_by_kind = {action["kind"]: action for action in body["actions"]}
+    assert body["schema_version"] == "ops_automation.v1"
+    assert body["source"] == "event_store"
+    assert body["health_status"] in {"degraded", "critical"}
+    assert body["action_count"] == len(body["actions"])
+    assert body["auto_executable_count"] >= 1
+    assert "configure_alert_webhook" in kinds
+    assert "assign_triage_owner" in kinds
+    assert "requeue_dead_delivery" in kinds
+    assert "generate_incident_brief" in kinds
+    assert "create_regression_draft" in kinds
+    assert "block_promotion" in kinds
+    assert "run_staging_eval" in kinds
+    assert actions_by_kind["generate_incident_brief"]["command"]["path"] == (
+        f"/api/v1/admin/incidents/runs/{trace_id}/brief"
+    )
+    assert actions_by_kind["assign_triage_owner"]["command"]["body"]["assignee_user_id"] == "operator_admin"
+    assert actions_by_kind["requeue_dead_delivery"]["safe_to_auto_execute"] is False
+    assert "message content" in " ".join(body["guardrails"]).lower()
+    assert "Where is order" not in serialized
+    assert "A1002" not in serialized
+    assert "tool_results" not in serialized
+
+
 def test_admin_can_record_promotion_decision_with_gate_snapshot(tmp_path, monkeypatch):
     monkeypatch.setenv("APP_DATABASE_URL", f"sqlite:///{tmp_path / 'events.db'}")
     get_settings.cache_clear()
@@ -3349,6 +3453,44 @@ def test_production_promotion_gate_requires_all_read_scopes(tmp_path, monkeypatc
     assert missing_feedback.json()["detail"] == "Missing required scope: feedback:read"
     assert allowed.status_code == 200
     assert allowed.json()["status"] == "blocked"
+
+
+def test_production_operations_automation_plan_requires_read_scopes(tmp_path, monkeypatch):
+    monkeypatch.setenv("APP_DATABASE_URL", f"sqlite:///{tmp_path / 'events.db'}")
+    get_settings.cache_clear()
+    app_container = create_container()
+    app.dependency_overrides[get_container] = lambda: app_container
+    try:
+        monkeypatch.setenv("APP_ENV", "production")
+        monkeypatch.setenv("APP_INTERNAL_API_KEY", "secret")
+        monkeypatch.setenv("APP_ACTOR_SIGNATURE_SECRET", ACTOR_SIGNATURE_SECRET)
+        get_settings.cache_clear()
+        client = TestClient(app)
+        missing_admin = client.get(
+            "/api/v1/admin/operations/automation-plan",
+            headers=_production_headers(scopes="monitor:read,audit:read,events:read,eval:read,feedback:read"),
+        )
+        missing_events = client.get(
+            "/api/v1/admin/operations/automation-plan",
+            headers=_production_headers(scopes="admin:read,monitor:read,audit:read,eval:read,feedback:read"),
+        )
+        allowed = client.get(
+            "/api/v1/admin/operations/automation-plan",
+            headers=_production_headers(
+                scopes="admin:read,monitor:read,audit:read,events:read,eval:read,feedback:read"
+            ),
+            params={"min_tool_calls": 0, "min_feedback_count": 0},
+        )
+    finally:
+        app.dependency_overrides.clear()
+        get_settings.cache_clear()
+
+    assert missing_admin.status_code == 403
+    assert missing_admin.json()["detail"] == "Missing required scope: admin:read"
+    assert missing_events.status_code == 403
+    assert missing_events.json()["detail"] == "Missing required scope: events:read"
+    assert allowed.status_code == 200
+    assert allowed.json()["schema_version"] == "ops_automation.v1"
 
 
 def test_production_promotion_decision_requires_write_and_gate_read_scopes(tmp_path, monkeypatch):

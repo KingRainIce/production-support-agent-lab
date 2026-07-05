@@ -11,6 +11,7 @@ import type {
   MonitorAlertTriageEvent,
   MonitorSummary,
   MonitorTriageMetricsResponse,
+  OperationsAutomationPlan,
   PromotionDecisionRecord,
   PromotionGateResponse,
   ReadinessResponse,
@@ -65,6 +66,13 @@ export async function GET(request: NextRequest) {
     () =>
       agentFetch("/api/v1/admin/promotion/decisions", {
         query: { limit: 5, order: "desc" }
+      }),
+    issues
+  );
+  const operationsAutomation = await optional<OperationsAutomationPlan>(
+    () =>
+      agentFetch("/api/v1/admin/operations/automation-plan", {
+        query: { source: monitorSource, deep: false, window_hours: 24, limit: 500 }
       }),
     issues
   );
@@ -175,6 +183,7 @@ export async function GET(request: NextRequest) {
     triageMetrics,
     promotionGate,
     promotionDecisions: promotionDecisions ?? [],
+    operationsAutomation,
     monitorAlertDelivery,
     triageEvents: triageEvents ?? [],
     evalGateLatest: resolvedEvalGateRecords[0] ?? null,
