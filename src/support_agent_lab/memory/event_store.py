@@ -9,6 +9,7 @@ from typing import Any
 from pydantic import BaseModel, Field
 
 from support_agent_lab.models import (
+    AgentFeedback,
     AgentRunTrace,
     AlertDeliveryRecord,
     AlertDeliveryStatus,
@@ -54,6 +55,21 @@ class AlertDeliveryMetricSummary(BaseModel):
     last_dead_lettered_at: datetime | None = None
 
 
+class FeedbackReasonSummary(BaseModel):
+    reason: str
+    count: int
+
+
+class FeedbackSummary(BaseModel):
+    total_count: int = 0
+    positive_count: int = 0
+    negative_count: int = 0
+    negative_rate: float = 0.0
+    counts_by_reason: list[FeedbackReasonSummary] = Field(default_factory=list)
+    window_start: str | None = None
+    window_end: str | None = None
+
+
 class SQLiteBackupReport(BaseModel):
     source_path: str
     backup_path: str
@@ -92,6 +108,7 @@ ALERT_DELIVERY_ENQUEUED_EVENT_TYPE = "monitor.alert.delivery.enqueued"
 ALERT_DELIVERY_ATTEMPTED_EVENT_TYPE = "monitor.alert.delivery.attempted"
 ALERT_DELIVERY_REQUEUED_EVENT_TYPE = "monitor.alert.delivery.requeued"
 ALERT_DELIVERY_CLOSED_EVENT_TYPE = "monitor.alert.delivery.closed"
+FEEDBACK_EVENT_TYPE = "agent.response.feedback"
 MEMORY_REPLAY_EVENT_TYPES = ("message.user", "message.assistant", "agent.run.completed")
 
 
@@ -189,6 +206,147 @@ class SQLiteEventStore:
             run_id=record.run_id,
             payload=record.model_dump(mode="json"),
         )
+
+    def append_agent_feedback(self, feedback: AgentFeedback) -> StoredEvent:
+        return self.append(
+            tenant_id=feedback.tenant_id,
+            conversation_id=feedback.conversation_id,
+            user_id=feedback.user_id,
+            run_id=feedback.run_id,
+            event_type=FEEDBACK_EVENT_TYPE,
+            payload=feedback.model_dump(mode="json"),
+        )
+
+    def list_agent_feedback(
+        self,
+        *,
+        tenant_id: str | None = None,
+        conversation_id: str | None = None,
+        run_id: str | None = None,
+        user_id: str | None = None,
+        rating: str | None = None,
+        created_after: str | None = None,
+        created_before: str | None = None,
+        limit: int = 100,
+        order: str = "desc",
+    ) -> list[AgentFeedback]:
+        sql = f"select payload_json from events where event_type = ?"
+        params, clauses = self._feedback_filter_params(
+            tenant_id=tenant_id,
+            conversation_id=conversation_id,
+            run_id=run_id,
+            user_id=user_id,
+            rating=rating,
+            created_after=created_after,
+            created_before=created_before,
+        )
+        params.insert(0, FEEDBACK_EVENT_TYPE)
+        if clauses:
+            sql += " and " + " and ".join(clauses)
+        direction = "asc" if order == "asc" else "desc"
+        sql += f" order by created_at {direction}, rowid {direction} limit ?"
+        with self._connect() as conn:
+            rows = conn.execute(sql, [*params, limit]).fetchall()
+        return [AgentFeedback.model_validate(json.loads(row["payload_json"])) for row in rows]
+
+    def summarize_agent_feedback(
+        self,
+        *,
+        tenant_id: str | None = None,
+        conversation_id: str | None = None,
+        run_id: str | None = None,
+        user_id: str | None = None,
+        rating: str | None = None,
+        created_after: str | None = None,
+        created_before: str | None = None,
+    ) -> FeedbackSummary:
+        params, clauses = self._feedback_filter_params(
+            tenant_id=tenant_id,
+            conversation_id=conversation_id,
+            run_id=run_id,
+            user_id=user_id,
+            rating=rating,
+            created_after=created_after,
+            created_before=created_before,
+        )
+        where_sql = f"where event_type = ?"
+        query_params: list[Any] = [FEEDBACK_EVENT_TYPE, *params]
+        if clauses:
+            where_sql += " and " + " and ".join(clauses)
+        totals_sql = f"""
+            select
+              count(*) as total_count,
+              coalesce(sum(case when json_extract(payload_json, '$.rating') = 'positive' then 1 else 0 end), 0)
+                as positive_count,
+              coalesce(sum(case when json_extract(payload_json, '$.rating') = 'negative' then 1 else 0 end), 0)
+                as negative_count,
+              min(created_at) as window_start,
+              max(created_at) as window_end
+            from events
+            {where_sql}
+        """
+        reasons_sql = f"""
+            select reason.value as reason, count(*) as count
+            from events, json_each(events.payload_json, '$.reasons') as reason
+            {where_sql}
+            group by reason.value
+            order by count desc, reason asc
+            limit 10
+        """
+        with self._connect() as conn:
+            totals = conn.execute(totals_sql, query_params).fetchone()
+            reason_rows = conn.execute(reasons_sql, query_params).fetchall()
+        total_count = int(totals["total_count"] or 0)
+        positive_count = int(totals["positive_count"] or 0)
+        negative_count = int(totals["negative_count"] or 0)
+        return FeedbackSummary(
+            total_count=total_count,
+            positive_count=positive_count,
+            negative_count=negative_count,
+            negative_rate=_rate(negative_count, total_count),
+            counts_by_reason=[
+                FeedbackReasonSummary(reason=str(row["reason"]), count=int(row["count"]))
+                for row in reason_rows
+            ],
+            window_start=totals["window_start"],
+            window_end=totals["window_end"],
+        )
+
+    def _feedback_filter_params(
+        self,
+        *,
+        tenant_id: str | None = None,
+        conversation_id: str | None = None,
+        run_id: str | None = None,
+        user_id: str | None = None,
+        rating: str | None = None,
+        created_after: str | None = None,
+        created_before: str | None = None,
+    ) -> tuple[list[Any], list[str]]:
+        params: list[Any] = []
+        clauses: list[str] = []
+        if tenant_id:
+            clauses.append("tenant_id = ?")
+            params.append(tenant_id)
+        if conversation_id:
+            clauses.append("conversation_id = ?")
+            params.append(conversation_id)
+        if run_id:
+            clauses.append("run_id = ?")
+            params.append(run_id)
+        if user_id:
+            clauses.append("user_id = ?")
+            params.append(user_id)
+        if rating:
+            clauses.append("json_extract(payload_json, '$.rating') = ?")
+            params.append(rating)
+        if created_after:
+            clauses.append("created_at >= ?")
+            params.append(created_after)
+        if created_before:
+            clauses.append("created_at <= ?")
+            params.append(created_before)
+        return params, clauses
 
     def enqueue_alert_delivery(self, record: AlertDeliveryRecord) -> tuple[AlertDeliveryRecord, bool]:
         created = False

@@ -33,10 +33,16 @@ from support_agent_lab.api.request_signature import (
 from support_agent_lab.api.rate_limit import InMemoryRateLimiter, rate_limit_key, should_rate_limit
 from support_agent_lab.api.metrics import InMemoryHTTPMetrics, PROMETHEUS_CONTENT_TYPE, render_prometheus_metrics
 from support_agent_lab.evals.suites import STAGING_EVAL_SUITES
-from support_agent_lab.memory.event_store import EventStoreRetentionReport, SQLiteBackupReport, StoredEvent
+from support_agent_lab.memory.event_store import (
+    EventStoreRetentionReport,
+    FeedbackSummary,
+    SQLiteBackupReport,
+    StoredEvent,
+)
 from support_agent_lab.memory.knowledge_call import call_knowledge_search
 from support_agent_lab.memory.replay import MemoryReplayResult, replay_conversation_memory
 from support_agent_lab.models import (
+    AgentFeedback,
     AgentResponse,
     AgentRunSearchItem,
     AgentRunSearchResponse,
@@ -48,6 +54,7 @@ from support_agent_lab.models import (
     EvalGateRecord,
     EvalReport,
     EvalToolFault,
+    FeedbackRating,
     Message,
     MonitorAlertStatus,
     MonitorAlertTriageEvent,
@@ -102,6 +109,13 @@ class ChatMessageResponse(BaseModel):
     trace_id: str
     handoff_required: bool
     citations: list[dict]
+
+
+class AgentFeedbackRequest(BaseModel):
+    rating: FeedbackRating
+    reasons: list[str] = Field(default_factory=list, max_length=10)
+    comment: str = Field(default="", max_length=1000)
+    source: Literal["user", "operator", "qa"] = "user"
 
 
 class TriageMonitorAlertRequest(BaseModel):
@@ -474,6 +488,20 @@ def _empty_tool_audit_summary() -> ToolAuditSummary:
         top_error_codes=[],
         tools=[],
     )
+
+
+def _normalize_feedback_reasons(reasons: list[str]) -> list[str]:
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for reason in reasons:
+        next_reason = reason.strip().lower().replace(" ", "_")[:80]
+        if not next_reason or next_reason in seen:
+            continue
+        seen.add(next_reason)
+        normalized.append(next_reason)
+        if len(normalized) >= 10:
+            break
+    return normalized
 
 
 def _observe_http_request(app: FastAPI, request: Request, *, status_code: int, started: float) -> None:
@@ -1710,6 +1738,100 @@ def create_app() -> FastAPI:
             require_admin(actor)
             require_scope(actor, "events:read")
         return run
+
+    @app.post("/api/v1/agent/runs/{run_id}/feedback")
+    def submit_agent_feedback(
+        run_id: str,
+        body: AgentFeedbackRequest,
+        deps: Annotated[AppContainer, Depends(get_container)],
+        actor: Annotated[RequestActor, Depends(get_request_actor)],
+    ) -> AgentFeedback:
+        require_scope(actor, "feedback:write")
+        if not deps.event_store:
+            raise HTTPException(status_code=503, detail="Event store is required for response feedback")
+        run = deps.orchestrator.runs.get(run_id)
+        if run is None:
+            run = deps.event_store.get_agent_run_trace(
+                run_id,
+                tenant_id=deps.settings.app_tenant_id,
+            )
+        if run is None:
+            raise HTTPException(status_code=404, detail="Run not found")
+        if body.source != "user":
+            require_admin(actor)
+        if run.user_id != actor.user_id:
+            require_admin(actor)
+            if body.source == "user":
+                raise HTTPException(
+                    status_code=403,
+                    detail="Cross-user feedback must use operator or qa source",
+                )
+        feedback = AgentFeedback(
+            tenant_id=deps.settings.app_tenant_id,
+            conversation_id=run.conversation_id,
+            run_id=run.id,
+            user_id=actor.user_id,
+            rating=body.rating,
+            reasons=_normalize_feedback_reasons(body.reasons),
+            comment=body.comment.strip(),
+            source=body.source,
+        )
+        deps.event_store.append_agent_feedback(feedback)
+        return feedback
+
+    @app.get("/api/v1/admin/feedback")
+    def list_agent_feedback(
+        deps: Annotated[AppContainer, Depends(get_container)],
+        actor: Annotated[RequestActor, Depends(get_request_actor)],
+        conversation_id: Annotated[str | None, Query()] = None,
+        run_id: Annotated[str | None, Query()] = None,
+        user_id: Annotated[str | None, Query()] = None,
+        rating: Annotated[FeedbackRating | None, Query()] = None,
+        created_after: Annotated[datetime | None, Query()] = None,
+        created_before: Annotated[datetime | None, Query()] = None,
+        limit: Annotated[int, Query(ge=1, le=500)] = 100,
+        order: Annotated[str, Query(pattern="^(asc|desc)$")] = "desc",
+    ) -> list[AgentFeedback]:
+        require_admin(actor)
+        require_scope(actor, "feedback:read")
+        if not deps.event_store:
+            return []
+        return deps.event_store.list_agent_feedback(
+            tenant_id=deps.settings.app_tenant_id,
+            conversation_id=conversation_id,
+            run_id=run_id,
+            user_id=user_id,
+            rating=rating.value if rating else None,
+            created_after=created_after.isoformat() if created_after else None,
+            created_before=created_before.isoformat() if created_before else None,
+            limit=limit,
+            order=order,
+        )
+
+    @app.get("/api/v1/admin/feedback/summary")
+    def summarize_agent_feedback(
+        deps: Annotated[AppContainer, Depends(get_container)],
+        actor: Annotated[RequestActor, Depends(get_request_actor)],
+        conversation_id: Annotated[str | None, Query()] = None,
+        run_id: Annotated[str | None, Query()] = None,
+        user_id: Annotated[str | None, Query()] = None,
+        rating: Annotated[FeedbackRating | None, Query()] = None,
+        created_after: Annotated[datetime | None, Query()] = None,
+        created_before: Annotated[datetime | None, Query()] = None,
+    ) -> FeedbackSummary:
+        require_admin(actor)
+        require_scope(actor, "feedback:read")
+        if not deps.event_store:
+            return FeedbackSummary()
+        return deps.event_store.summarize_agent_feedback(
+            tenant_id=deps.settings.app_tenant_id,
+            conversation_id=conversation_id,
+            run_id=run_id,
+            user_id=user_id,
+            rating=rating.value if rating else None,
+            created_after=created_after.isoformat() if created_after else None,
+            created_before=created_before.isoformat() if created_before else None,
+        )
 
     @app.get("/api/v1/admin/tools")
     def list_tools(

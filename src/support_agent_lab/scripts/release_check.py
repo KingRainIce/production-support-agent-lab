@@ -22,8 +22,8 @@ SMOKE_ENV = {
     "APP_ACTOR_SIGNATURE_SECRET": "actor-signing-secret-with-32-byte-minimum",
 }
 
-AGENT_SCOPES = "crm:read,order:read,shipping:read,ticket:write,kb:read"
-ADMIN_SCOPES = "admin:read,admin:write,events:read,monitor:read,audit:read,eval:read,memory:replay"
+AGENT_SCOPES = "crm:read,order:read,shipping:read,ticket:write,kb:read,feedback:write"
+ADMIN_SCOPES = "admin:read,admin:write,events:read,monitor:read,audit:read,eval:read,feedback:read,memory:replay"
 DOCKER_IMAGE = "production-support-agent-lab:release-check"
 
 

@@ -1586,6 +1586,200 @@ def test_run_trace_reads_event_store_and_requires_events_scope_for_cross_user_ad
     assert allowed.json()["id"] == trace_id
 
 
+def test_user_can_submit_feedback_for_own_run_and_admin_can_summarize(tmp_path, monkeypatch):
+    monkeypatch.setenv("APP_DATABASE_URL", f"sqlite:///{tmp_path / 'events.db'}")
+    get_settings.cache_clear()
+    app_container = create_container()
+    app.dependency_overrides[get_container] = lambda: app_container
+    try:
+        client = TestClient(app)
+        session = client.post("/api/v1/chat/sessions", json={"user_id": "user_demo"}).json()
+        message = client.post(
+            "/api/v1/chat/messages",
+            json={
+                "conversation_id": session["conversation_id"],
+                "user_id": "user_demo",
+                "content": "Where is order A1002 shipping?",
+            },
+        ).json()
+        trace_id = message["trace_id"]
+
+        other_user = client.post(
+            f"/api/v1/agent/runs/{trace_id}/feedback",
+            headers={"X-Demo-User": "other_user"},
+            json={"rating": "negative", "reasons": ["wrong_order"]},
+        )
+        created = client.post(
+            f"/api/v1/agent/runs/{trace_id}/feedback",
+            json={
+                "rating": "negative",
+                "reasons": [" Wrong Order ", "wrong order", "", "unsafe"],
+                "comment": "The answer used the wrong order.",
+            },
+        )
+        listed = client.get(
+            "/api/v1/admin/feedback",
+            headers={"X-Demo-Role": "admin"},
+            params={"run_id": trace_id},
+        )
+        summary = client.get(
+            "/api/v1/admin/feedback/summary",
+            headers={"X-Demo-Role": "admin"},
+            params={"run_id": trace_id},
+        )
+    finally:
+        app.dependency_overrides.clear()
+        get_settings.cache_clear()
+
+    assert other_user.status_code == 403
+    assert created.status_code == 200
+    created_body = created.json()
+    assert created_body["run_id"] == trace_id
+    assert created_body["conversation_id"] == session["conversation_id"]
+    assert created_body["user_id"] == "user_demo"
+    assert created_body["rating"] == "negative"
+    assert created_body["reasons"] == ["wrong_order", "unsafe"]
+    assert listed.status_code == 200
+    assert [item["id"] for item in listed.json()] == [created_body["id"]]
+    assert summary.status_code == 200
+    summary_body = summary.json()
+    assert summary_body["total_count"] == 1
+    assert summary_body["negative_count"] == 1
+    assert summary_body["negative_rate"] == 1
+    assert {item["reason"]: item["count"] for item in summary_body["counts_by_reason"]} == {
+        "wrong_order": 1,
+        "unsafe": 1,
+    }
+
+
+def test_admin_operator_feedback_for_cross_user_run_requires_operator_source(tmp_path, monkeypatch):
+    monkeypatch.setenv("APP_DATABASE_URL", f"sqlite:///{tmp_path / 'events.db'}")
+    get_settings.cache_clear()
+    app_container = create_container()
+    app.dependency_overrides[get_container] = lambda: app_container
+    try:
+        client = TestClient(app)
+        session = client.post("/api/v1/chat/sessions", json={"user_id": "user_demo"}).json()
+        message = client.post(
+            "/api/v1/chat/messages",
+            json={
+                "conversation_id": session["conversation_id"],
+                "user_id": "user_demo",
+                "content": "Where is order A1002 shipping?",
+            },
+        ).json()
+        trace_id = message["trace_id"]
+
+        pretending_to_be_user = client.post(
+            f"/api/v1/agent/runs/{trace_id}/feedback",
+            headers={"X-Demo-User": "qa_operator", "X-Demo-Role": "admin"},
+            json={"rating": "negative", "reasons": ["wrong_order"]},
+        )
+        operator_feedback = client.post(
+            f"/api/v1/agent/runs/{trace_id}/feedback",
+            headers={"X-Demo-User": "qa_operator", "X-Demo-Role": "admin"},
+            json={
+                "rating": "negative",
+                "reasons": ["wrong_order"],
+                "comment": "QA found the answer referenced a different order.",
+                "source": "operator",
+            },
+        )
+        listed = client.get(
+            "/api/v1/admin/feedback",
+            headers={"X-Demo-Role": "admin"},
+            params={"run_id": trace_id},
+        )
+    finally:
+        app.dependency_overrides.clear()
+        get_settings.cache_clear()
+
+    assert pretending_to_be_user.status_code == 403
+    assert pretending_to_be_user.json()["detail"] == "Cross-user feedback must use operator or qa source"
+    assert operator_feedback.status_code == 200
+    body = operator_feedback.json()
+    assert body["source"] == "operator"
+    assert body["user_id"] == "qa_operator"
+    assert listed.status_code == 200
+    assert [item["id"] for item in listed.json()] == [body["id"]]
+
+
+def test_production_feedback_write_requires_feedback_scope(tmp_path, monkeypatch):
+    monkeypatch.setenv("APP_DATABASE_URL", f"sqlite:///{tmp_path / 'events.db'}")
+    get_settings.cache_clear()
+    app_container = create_container()
+    app.dependency_overrides[get_container] = lambda: app_container
+    try:
+        client = TestClient(app)
+        session = client.post(
+            "/api/v1/chat/sessions",
+            headers={"X-Demo-User": "user_prod"},
+            json={"user_id": "user_prod"},
+        ).json()
+        message = client.post(
+            "/api/v1/chat/messages",
+            headers={"X-Demo-User": "user_prod"},
+            json={
+                "conversation_id": session["conversation_id"],
+                "user_id": "user_prod",
+                "content": "Where is order A1002 shipping?",
+            },
+        ).json()
+        trace_id = message["trace_id"]
+
+        monkeypatch.setenv("APP_ENV", "production")
+        monkeypatch.setenv("APP_INTERNAL_API_KEY", "secret")
+        monkeypatch.setenv("APP_ACTOR_SIGNATURE_SECRET", ACTOR_SIGNATURE_SECRET)
+        get_settings.cache_clear()
+        missing_scope = client.post(
+            f"/api/v1/agent/runs/{trace_id}/feedback",
+            headers=_production_headers(user_id="user_prod", roles="user", scopes="crm:read"),
+            json={"rating": "positive"},
+        )
+        allowed = client.post(
+            f"/api/v1/agent/runs/{trace_id}/feedback",
+            headers=_production_headers(user_id="user_prod", roles="user", scopes="feedback:write"),
+            json={"rating": "positive", "reasons": ["helpful"]},
+        )
+    finally:
+        app.dependency_overrides.clear()
+        get_settings.cache_clear()
+
+    assert missing_scope.status_code == 403
+    assert missing_scope.json()["detail"] == "Missing required scope: feedback:write"
+    assert allowed.status_code == 200
+    assert allowed.json()["rating"] == "positive"
+
+
+def test_production_feedback_admin_read_requires_feedback_scope(tmp_path, monkeypatch):
+    monkeypatch.setenv("APP_DATABASE_URL", f"sqlite:///{tmp_path / 'events.db'}")
+    get_settings.cache_clear()
+    app_container = create_container()
+    app.dependency_overrides[get_container] = lambda: app_container
+    try:
+        monkeypatch.setenv("APP_ENV", "production")
+        monkeypatch.setenv("APP_INTERNAL_API_KEY", "secret")
+        monkeypatch.setenv("APP_ACTOR_SIGNATURE_SECRET", ACTOR_SIGNATURE_SECRET)
+        get_settings.cache_clear()
+        client = TestClient(app)
+        missing_scope = client.get(
+            "/api/v1/admin/feedback/summary",
+            headers=_production_headers(scopes="monitor:read"),
+        )
+        allowed = client.get(
+            "/api/v1/admin/feedback/summary",
+            headers=_production_headers(scopes="feedback:read"),
+        )
+    finally:
+        app.dependency_overrides.clear()
+        get_settings.cache_clear()
+
+    assert missing_scope.status_code == 403
+    assert missing_scope.json()["detail"] == "Missing required scope: feedback:read"
+    assert allowed.status_code == 200
+    assert allowed.json()["total_count"] == 0
+
+
 def test_admin_can_list_persisted_events():
     client = TestClient(app)
     session = client.post("/api/v1/chat/sessions", json={"user_id": "user_demo"}).json()

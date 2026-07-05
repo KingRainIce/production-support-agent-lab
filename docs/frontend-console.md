@@ -69,6 +69,9 @@ real local FastAPI endpoints:
    previews or applies the conservative retention policy.
 14. `GET /api/v1/admin/conversations/{conversation_id}/memory/replay` when
    the `Memory` workbench rebuilds a conversation from append-only events.
+15. `GET /api/v1/admin/feedback` and
+   `GET /api/v1/admin/feedback/summary` when the `Feedback` workbench reviews
+   user/operator ratings linked to persisted runs.
 
 ## Production Run
 
@@ -79,7 +82,7 @@ AGENT_API_BASE_URL=http://app:8000
 FRONTEND_AUTH_MODE=production
 FRONTEND_ACTOR_USER_ID=console_operator
 FRONTEND_ACTOR_ROLES=admin
-FRONTEND_ACTOR_SCOPES=crm:read,order:read,shipping:read,ticket:write,kb:read,admin:read,admin:write,audit:read,events:read,eval:read,eval:run,knowledge:diagnose,memory:replay,monitor:read,monitor:write
+FRONTEND_ACTOR_SCOPES=crm:read,order:read,shipping:read,ticket:write,kb:read,feedback:write,admin:read,admin:write,audit:read,events:read,eval:read,eval:run,feedback:read,knowledge:diagnose,memory:replay,monitor:read,monitor:write
 FRONTEND_REQUEST_SIGNATURE_REQUIRED=true
 APP_TENANT_ID=your_tenant
 APP_INTERNAL_API_KEY=your_internal_gateway_secret

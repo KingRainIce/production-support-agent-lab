@@ -12,9 +12,11 @@ from support_agent_lab.memory.event_store import EVAL_GATE_EVENT_TYPE
 from support_agent_lab.memory.replay import replay_conversation_memory
 from support_agent_lab.memory.store import ConversationMemory, KnowledgeIndex
 from support_agent_lab.models import (
+    AgentFeedback,
     AlertDeliveryRecord,
     AlertDeliveryStatus,
     EvalGateRecord,
+    FeedbackRating,
     IntentType,
     Message,
     MonitorAlertStatus,
@@ -366,6 +368,63 @@ def test_event_store_filters_eval_gate_records_by_tenant_status_window_and_order
     assert [record.id for record in newest] == [new_failed.id, mid_error.id]
     assert [record.id for record in failed_in_window] == [new_failed.id]
     assert [record.id for record in alert_records] == [new_failed.id]
+
+
+def test_event_store_persists_and_summarizes_agent_feedback(tmp_path):
+    event_store = SQLiteEventStore(tmp_path / "events.db")
+    positive = AgentFeedback(
+        tenant_id="tenant_a",
+        conversation_id="conv_feedback",
+        run_id="run_positive",
+        user_id="user_1",
+        rating=FeedbackRating.positive,
+        reasons=["helpful"],
+        comment="Solved it.",
+    )
+    negative = AgentFeedback(
+        tenant_id="tenant_a",
+        conversation_id="conv_feedback",
+        run_id="run_negative",
+        user_id="user_1",
+        rating=FeedbackRating.negative,
+        reasons=["wrong_order", "unsafe"],
+        comment="Used the wrong order.",
+    )
+    other = AgentFeedback(
+        tenant_id="tenant_b",
+        conversation_id="conv_feedback",
+        run_id="run_other",
+        user_id="user_2",
+        rating=FeedbackRating.negative,
+        reasons=["irrelevant"],
+    )
+
+    event_store.append_agent_feedback(positive)
+    event_store.append_agent_feedback(negative)
+    event_store.append_agent_feedback(other)
+
+    tenant_feedback = event_store.list_agent_feedback(
+        tenant_id="tenant_a",
+        conversation_id="conv_feedback",
+        order="asc",
+    )
+    negative_feedback = event_store.list_agent_feedback(
+        tenant_id="tenant_a",
+        rating="negative",
+    )
+    summary = event_store.summarize_agent_feedback(tenant_id="tenant_a")
+
+    assert [feedback.id for feedback in tenant_feedback] == [positive.id, negative.id]
+    assert [feedback.run_id for feedback in negative_feedback] == ["run_negative"]
+    assert summary.total_count == 2
+    assert summary.positive_count == 1
+    assert summary.negative_count == 1
+    assert summary.negative_rate == 0.5
+    assert {item.reason: item.count for item in summary.counts_by_reason} == {
+        "helpful": 1,
+        "wrong_order": 1,
+        "unsafe": 1,
+    }
 
 
 @pytest.mark.asyncio

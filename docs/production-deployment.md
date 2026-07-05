@@ -105,7 +105,7 @@ Production API requests must come through a trusted gateway. The gateway authent
 X-Internal-Auth: <APP_INTERNAL_API_KEY>
 X-Actor-User-Id: <authenticated user id>
 X-Actor-Roles: user,admin
-X-Actor-Scopes: crm:read,order:read,shipping:read,ticket:write,kb:read
+X-Actor-Scopes: crm:read,order:read,shipping:read,ticket:write,kb:read,feedback:write
 X-Actor-Timestamp: <unix timestamp>
 X-Actor-Signature: sha256=<HMAC over tenant/user/roles/scopes/timestamp>
 X-Request-Nonce: <unique request nonce>
@@ -148,7 +148,7 @@ export APP_ACTOR_SIGNATURE_SECRET=your_actor_signature_secret_min_32_chars
 python scripts/sign_actor_headers.py \
   --user-id user_prod \
   --roles user \
-  --scopes "crm:read,order:read,shipping:read,ticket:write,kb:read" \
+  --scopes "crm:read,order:read,shipping:read,ticket:write,kb:read,feedback:write" \
   --method POST \
   --path /api/v1/chat/sessions \
   --body '{"user_id":"user_prod"}' \
@@ -185,10 +185,14 @@ Admin role is not a wildcard. Production admin endpoints also require explicit m
 | `POST /api/v1/admin/evals/golden` | `eval:run`; local/staging only. Disabled when `APP_ENV=production`. |
 | `POST /api/v1/admin/evals/staging` | `eval:run`; local/staging only. Runs bundled golden/security/tool/memory/routing/monitor/retrieval suites and appends suite + aggregate gate records. Disabled when `APP_ENV=production`. |
 | `GET /api/v1/admin/evals/gates` | `eval:read` |
+| `GET /api/v1/admin/feedback` | `feedback:read` |
+| `GET /api/v1/admin/feedback/summary` | `feedback:read` |
 | `GET /api/v1/admin/promotion/gate` | `admin:read`, `monitor:read`, `audit:read`, `eval:read`. Read-only release preflight. |
 | `/api/v1/admin/conversations/{conversation_id}/memory/replay` | `memory:replay` |
 
 `GET /api/v1/agent/runs/{run_id}` lets the original actor inspect their own run trace. Cross-user incident review must use an admin actor with `events:read`, and the endpoint falls back to the SQLite event store when live in-process run state has been cleared.
+
+`POST /api/v1/agent/runs/{run_id}/feedback` lets the original actor attach a positive or negative rating, normalized reason codes, and a short comment to their own persisted run. It requires `feedback:write`, appends an `agent.response.feedback` event, and does not mutate the run trace. `source=user` is the default. `source=operator` or `source=qa` requires an admin actor; cross-user feedback must use one of those non-user sources so operators do not impersonate end users. Admin review uses the feedback endpoints above with `feedback:read`.
 
 Eval gate history is stored as append-only `eval.gate.completed` events and
 returned through the typed `GET /api/v1/admin/evals/gates` endpoint. Records
@@ -298,7 +302,7 @@ Example monitor operator:
 
 ```text
 X-Actor-Roles: admin
-X-Actor-Scopes: monitor:read,monitor:write,events:read,audit:read
+X-Actor-Scopes: monitor:read,monitor:write,events:read,audit:read,feedback:read
 X-Actor-Timestamp: <unix timestamp>
 X-Actor-Signature: sha256=<HMAC over tenant/user/roles/scopes/timestamp>
 ```
@@ -307,7 +311,7 @@ Example incident investigator:
 
 ```text
 X-Actor-Roles: admin
-X-Actor-Scopes: events:read,monitor:read,audit:read,knowledge:diagnose,memory:replay
+X-Actor-Scopes: events:read,monitor:read,audit:read,knowledge:diagnose,memory:replay,feedback:read
 X-Actor-Timestamp: <unix timestamp>
 X-Actor-Signature: sha256=<HMAC over tenant/user/roles/scopes/timestamp>
 ```
@@ -550,7 +554,7 @@ The default release check is deterministic and local. `--prod-smoke` is intentio
 - During a controlled staging failure, repeated Business API `5xx` responses open the adapter circuit and `/api/v1/ready?deep=true` reports `business_api` as failed with `circuit=open`.
 - During a controlled staging failure, repeated Knowledge API `5xx` responses open the adapter circuit and retrieval traces show `knowledge_circuit_open`; `/api/v1/ready?deep=true` reports `knowledge_api` as failed with `circuit=open`.
 - Removing `APP_ACTOR_SIGNATURE_SECRET`, using a placeholder value, or setting a short secret makes startup fail.
-- `python scripts/sign_actor_headers.py --user-id user_prod --roles user --scopes "crm:read,order:read,shipping:read,ticket:write,kb:read" --method POST --path /api/v1/chat/sessions --body '{"user_id":"user_prod"}' --format curl` emits signed actor and request headers when the gateway secrets are present in the environment.
+- `python scripts/sign_actor_headers.py --user-id user_prod --roles user --scopes "crm:read,order:read,shipping:read,ticket:write,kb:read,feedback:write" --method POST --path /api/v1/chat/sessions --body '{"user_id":"user_prod"}' --format curl` emits signed actor and request headers when the gateway secrets are present in the environment.
 - Changing `X-Actor-User-Id`, `X-Actor-Roles`, or `X-Actor-Scopes` after signing makes the request fail with `401`.
 - Changing the path, body, body hash, or reusing the same `X-Request-Nonce` makes the request fail with `401`.
 - Calling `/api/v1/admin/evals/golden` or `/api/v1/admin/evals/staging` in production fails with `409`; bundled eval remains a CI/staging concern, not a live production tool call.

@@ -408,6 +408,43 @@ export type ToolAuditSearchResponse = {
   order: "asc" | "desc";
 };
 
+export type FeedbackRating = "positive" | "negative";
+
+export type AgentFeedback = {
+  id: string;
+  tenant_id: string;
+  conversation_id: string;
+  run_id: string;
+  user_id: string;
+  rating: FeedbackRating;
+  reasons: string[];
+  comment: string;
+  source: "user" | "operator" | "qa";
+  created_at: string;
+};
+
+export type FeedbackReasonSummary = {
+  reason: string;
+  count: number;
+};
+
+export type FeedbackSummary = {
+  total_count: number;
+  positive_count: number;
+  negative_count: number;
+  negative_rate: number;
+  counts_by_reason: FeedbackReasonSummary[];
+  window_start: string | null;
+  window_end: string | null;
+};
+
+export type FeedbackSearchResponse = {
+  items: AgentFeedback[];
+  summary: FeedbackSummary;
+  limit: number;
+  order: "asc" | "desc";
+};
+
 export type PromotionGateCheck = {
   name: string;
   status: "passed" | "warn" | "blocked";

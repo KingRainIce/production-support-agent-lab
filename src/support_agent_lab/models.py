@@ -238,6 +238,24 @@ class AgentResponse(BaseModel):
     handoff_reason: str | None = None
 
 
+class FeedbackRating(str, Enum):
+    positive = "positive"
+    negative = "negative"
+
+
+class AgentFeedback(BaseModel):
+    id: str = Field(default_factory=lambda: new_id("fdbk"))
+    tenant_id: str
+    conversation_id: str
+    run_id: str
+    user_id: str
+    rating: FeedbackRating
+    reasons: list[str] = Field(default_factory=list, max_length=10)
+    comment: str = Field(default="", max_length=1000)
+    source: Literal["user", "operator", "qa"] = "user"
+    created_at: datetime = Field(default_factory=utc_now)
+
+
 class ConversationState(BaseModel):
     tenant_id: str
     conversation_id: str

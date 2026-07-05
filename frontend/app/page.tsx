@@ -73,6 +73,7 @@ import type {
   AgentRunSearchItem,
   AgentRunSearchResponse,
   AgentRunTrace,
+  AgentFeedback,
   AlertDispatchReport,
   AlertDeliveryRecord,
   AlertDeliveryStatus,
@@ -80,6 +81,7 @@ import type {
   EvalGateRecord,
   EvalReport,
   EventStoreRetentionReport,
+  FeedbackSearchResponse,
   IncidentRunBundle,
   JsonValue,
   KnowledgeSearchResponse,
@@ -152,6 +154,17 @@ type ToolAuditSearchOverrides = Partial<{
   order: "asc" | "desc";
 }>;
 
+type FeedbackSearchOverrides = Partial<{
+  rating: string;
+  runId: string;
+  userId: string;
+  conversationId: string;
+  createdAfter: string;
+  createdBefore: string;
+  limit: string;
+  order: "asc" | "desc";
+}>;
+
 type AlertWorkbenchView = "queue" | "drilldown" | "delivery";
 type AlertDeliveryStatusFilter = AlertDeliveryStatus | "all";
 
@@ -220,6 +233,17 @@ export default function Home() {
   const [memoryReplay, setMemoryReplay] = useState<MemoryReplayResult | null>(null);
   const [memoryLoading, setMemoryLoading] = useState(false);
   const [memoryError, setMemoryError] = useState<string | null>(null);
+  const [feedbackRating, setFeedbackRating] = useState("");
+  const [feedbackRunId, setFeedbackRunId] = useState("");
+  const [feedbackUserId, setFeedbackUserId] = useState("");
+  const [feedbackConversationId, setFeedbackConversationId] = useState("");
+  const [feedbackCreatedAfter, setFeedbackCreatedAfter] = useState("");
+  const [feedbackCreatedBefore, setFeedbackCreatedBefore] = useState("");
+  const [feedbackLimit, setFeedbackLimit] = useState("50");
+  const [feedbackOrder, setFeedbackOrder] = useState<"asc" | "desc">("desc");
+  const [feedbackResults, setFeedbackResults] = useState<FeedbackSearchResponse | null>(null);
+  const [feedbackLoading, setFeedbackLoading] = useState(false);
+  const [feedbackError, setFeedbackError] = useState<string | null>(null);
   const [eventBackupLabel, setEventBackupLabel] = useState("manual");
   const [eventBackupReport, setEventBackupReport] = useState<SQLiteBackupReport | null>(null);
   const [eventOpsBusy, setEventOpsBusy] = useState<string | null>(null);
@@ -519,6 +543,76 @@ export default function Home() {
     event.preventDefault();
     void searchRuns(0);
   }
+
+  const searchFeedback = useCallback(async (overrides: FeedbackSearchOverrides = {}) => {
+    const values = {
+      rating: overrides.rating ?? feedbackRating,
+      runId: overrides.runId ?? feedbackRunId,
+      userId: overrides.userId ?? feedbackUserId,
+      conversationId: overrides.conversationId ?? feedbackConversationId,
+      createdAfter: overrides.createdAfter ?? feedbackCreatedAfter,
+      createdBefore: overrides.createdBefore ?? feedbackCreatedBefore,
+      limit: overrides.limit ?? feedbackLimit,
+      order: overrides.order ?? feedbackOrder
+    };
+    if (overrides.runId !== undefined) {
+      setFeedbackRunId(overrides.runId);
+    }
+    if (overrides.conversationId !== undefined) {
+      setFeedbackConversationId(overrides.conversationId);
+    }
+    setFeedbackLoading(true);
+    setFeedbackError(null);
+    try {
+      const params = new URLSearchParams();
+      for (const [key, value] of Object.entries(values)) {
+        const trimmed = String(value).trim();
+        if (trimmed) {
+          params.set(key, trimmed);
+        }
+      }
+      const response = await fetch(`/api/console/feedback?${params.toString()}`, {
+        cache: "no-store"
+      });
+      const data = await response.json();
+      if (!response.ok) {
+        throw new Error(data.detail ?? "Feedback search failed");
+      }
+      setFeedbackResults(data as FeedbackSearchResponse);
+    } catch (nextError) {
+      setFeedbackError(nextError instanceof Error ? nextError.message : "Feedback search failed");
+    } finally {
+      setFeedbackLoading(false);
+    }
+  }, [
+    feedbackConversationId,
+    feedbackCreatedAfter,
+    feedbackCreatedBefore,
+    feedbackLimit,
+    feedbackOrder,
+    feedbackRating,
+    feedbackRunId,
+    feedbackUserId
+  ]);
+
+  function submitFeedbackSearch(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    void searchFeedback();
+  }
+
+  useEffect(() => {
+    if (!urlStateReady || workspaceMode !== "feedback" || feedbackResults || feedbackLoading) {
+      return;
+    }
+    void searchFeedback(selectedRunId ? { runId: selectedRunId } : {});
+  }, [
+    feedbackLoading,
+    feedbackResults,
+    searchFeedback,
+    selectedRunId,
+    urlStateReady,
+    workspaceMode
+  ]);
 
   async function searchToolAudit(overrides: ToolAuditSearchOverrides = {}) {
     setToolAuditLoading(true);
@@ -904,6 +998,16 @@ export default function Home() {
     void loadSnapshot({ runId: item.id });
   }
 
+  function openFeedbackRecord(record: AgentFeedback) {
+    setWorkspaceMode("feedback");
+    setSelectedAlertKey(null);
+    setSelectedRunId(record.run_id);
+    setRunQuery(record.run_id);
+    setFeedbackRunId(record.run_id);
+    setFeedbackConversationId(record.conversation_id);
+    void loadSnapshot({ runId: record.run_id });
+  }
+
   function openToolAuditRecord(record: ToolAuditRecord) {
     setWorkspaceMode("tools");
     setEvidenceTab("tool-audit");
@@ -1134,6 +1238,16 @@ export default function Home() {
               void replayConversationMemory(currentConversationId, memoryLimit);
             }
           }
+          if (target === "feedback") {
+            setWorkspaceMode("feedback");
+            const currentRunId = snapshot?.incident?.run.id ?? "";
+            if (currentRunId && !feedbackRunId) {
+              setFeedbackRunId(currentRunId);
+            }
+            if (!feedbackResults && !feedbackLoading) {
+              void searchFeedback(currentRunId ? { runId: currentRunId } : {});
+            }
+          }
           if (target === "alerts") {
             setWorkspaceMode("alerts");
             setSeverityFilter("all");
@@ -1329,6 +1443,32 @@ export default function Home() {
               onLimit={setMemoryLimit}
               onSubmit={submitMemoryReplay}
               onUseCurrent={loadCurrentRunMemory}
+            />
+          ) : workspaceMode === "feedback" ? (
+            <FeedbackWorkbenchPanel
+              results={feedbackResults}
+              loading={feedbackLoading}
+              error={feedbackError}
+              rating={feedbackRating}
+              runId={feedbackRunId}
+              userId={feedbackUserId}
+              conversationId={feedbackConversationId}
+              createdAfter={feedbackCreatedAfter}
+              createdBefore={feedbackCreatedBefore}
+              limit={feedbackLimit}
+              order={feedbackOrder}
+              currentRunId={run?.id ?? null}
+              onRating={setFeedbackRating}
+              onRunId={setFeedbackRunId}
+              onUserId={setFeedbackUserId}
+              onConversationId={setFeedbackConversationId}
+              onCreatedAfter={setFeedbackCreatedAfter}
+              onCreatedBefore={setFeedbackCreatedBefore}
+              onLimit={setFeedbackLimit}
+              onOrder={setFeedbackOrder}
+              onSubmit={submitFeedbackSearch}
+              onSearch={searchFeedback}
+              onOpenFeedback={openFeedbackRecord}
             />
           ) : workspaceMode === "settings" ? (
             <SettingsWorkbenchPanel
@@ -1678,6 +1818,7 @@ function Rail({
     ["tools", "Tools", Wrench, null],
     ["knowledge", "Knowledge", BookOpen, null],
     ["memory", "Memory", Database, null],
+    ["feedback", "Feedback", ClipboardList, null],
     ["settings", "Settings", Settings, null]
   ];
   return (
@@ -2945,6 +3086,201 @@ function RegressionDraftPanel({
         </>
       ) : null}
     </section>
+  );
+}
+
+function FeedbackWorkbenchPanel({
+  results,
+  loading,
+  error,
+  rating,
+  runId,
+  userId,
+  conversationId,
+  createdAfter,
+  createdBefore,
+  limit,
+  order,
+  currentRunId,
+  onRating,
+  onRunId,
+  onUserId,
+  onConversationId,
+  onCreatedAfter,
+  onCreatedBefore,
+  onLimit,
+  onOrder,
+  onSubmit,
+  onSearch,
+  onOpenFeedback
+}: {
+  results: FeedbackSearchResponse | null;
+  loading: boolean;
+  error: string | null;
+  rating: string;
+  runId: string;
+  userId: string;
+  conversationId: string;
+  createdAfter: string;
+  createdBefore: string;
+  limit: string;
+  order: "asc" | "desc";
+  currentRunId: string | null;
+  onRating: (value: string) => void;
+  onRunId: (value: string) => void;
+  onUserId: (value: string) => void;
+  onConversationId: (value: string) => void;
+  onCreatedAfter: (value: string) => void;
+  onCreatedBefore: (value: string) => void;
+  onLimit: (value: string) => void;
+  onOrder: (value: "asc" | "desc") => void;
+  onSubmit: (event: FormEvent<HTMLFormElement>) => void;
+  onSearch: (overrides?: FeedbackSearchOverrides) => void | Promise<void>;
+  onOpenFeedback: (feedback: AgentFeedback) => void;
+}) {
+  const items = results?.items ?? [];
+  const summary = results?.summary ?? null;
+  const topReasons = summary?.counts_by_reason.slice(0, 4) ?? [];
+  return (
+    <aside className="alerts-panel run-workbench feedback-workbench">
+      <div className="panel-heading">
+        <div>
+          <span>Feedback Loop</span>
+          <strong>{summary ? `${summary.total_count} response ratings` : "Human signal"}</strong>
+        </div>
+      </div>
+
+      <form className="run-search-form" onSubmit={onSubmit}>
+        <div className="run-filter-grid">
+          <label className="filter-control">
+            <Filter size={14} />
+            <select value={rating} onChange={(event) => onRating(event.target.value)} aria-label="Filter feedback rating">
+              <option value="">Any rating</option>
+              <option value="negative">Negative</option>
+              <option value="positive">Positive</option>
+            </select>
+          </label>
+          <label className="filter-control">
+            <SlidersHorizontal size={14} />
+            <select value={order} onChange={(event) => onOrder(event.target.value as "asc" | "desc")} aria-label="Feedback order">
+              <option value="desc">Newest first</option>
+              <option value="asc">Oldest first</option>
+            </select>
+          </label>
+        </div>
+        <label className="search-control">
+          <Search size={14} />
+          <input value={runId} onChange={(event) => onRunId(event.target.value)} placeholder="run_id" aria-label="Filter feedback by run id" />
+        </label>
+        <label className="field-label">
+          User
+          <input value={userId} onChange={(event) => onUserId(event.target.value)} placeholder="user id" />
+        </label>
+        <label className="field-label">
+          Conversation
+          <input value={conversationId} onChange={(event) => onConversationId(event.target.value)} placeholder="conv_..." />
+        </label>
+        <div className="run-filter-grid">
+          <label className="field-label compact">
+            From
+            <input value={createdAfter} onChange={(event) => onCreatedAfter(event.target.value)} placeholder="2026-07-01T00:00:00Z" />
+          </label>
+          <label className="field-label compact">
+            To
+            <input value={createdBefore} onChange={(event) => onCreatedBefore(event.target.value)} placeholder="2026-07-05T23:59:59Z" />
+          </label>
+        </div>
+        <div className="run-filter-grid">
+          <label className="filter-control">
+            <SlidersHorizontal size={14} />
+            <select value={limit} onChange={(event) => onLimit(event.target.value)} aria-label="Feedback result limit">
+              <option value="25">25 rows</option>
+              <option value="50">50 rows</option>
+              <option value="100">100 rows</option>
+              <option value="200">200 rows</option>
+            </select>
+          </label>
+          <button className="primary-button compact-action" type="submit" disabled={loading}>
+            {loading ? <Loader2 className="spin" size={16} /> : <Search size={16} />}
+            Search
+          </button>
+        </div>
+        {currentRunId ? (
+          <button
+            className="secondary-button"
+            type="button"
+            onClick={() => onSearch({ runId: currentRunId })}
+            disabled={loading}
+          >
+            <ClipboardList size={16} />
+            Use selected run
+          </button>
+        ) : null}
+      </form>
+
+      <div className="run-search-stats" aria-label="Feedback summary stats">
+        <Metric label="Negative" value={String(summary?.negative_count ?? 0)} />
+        <Metric label="Positive" value={String(summary?.positive_count ?? 0)} />
+        <Metric label="Neg rate" value={formatRate(summary?.negative_rate ?? 0)} />
+        <Metric label="Window" value={summary?.window_start ? "filtered" : "all"} />
+      </div>
+
+      {topReasons.length ? (
+        <div className="tool-summary-list">
+          {topReasons.map((reason) => (
+            <div className="tool-summary-row" key={reason.reason}>
+              <span>{reason.reason}</span>
+              <strong>{reason.count}</strong>
+            </div>
+          ))}
+        </div>
+      ) : null}
+
+      <div className={error ? "inline-error" : "sr-only"} role="status" aria-live="polite">
+        {error ?? `${items.length} feedback records loaded`}
+      </div>
+
+      <div className="run-result-list">
+        {loading && !results ? <LoadingBlock /> : null}
+        {!loading && results && !items.length ? (
+          <PanelEmpty title="No feedback found" detail="Try a broader filter or wait for users to rate responses." />
+        ) : null}
+        {!results && !loading ? (
+          <PanelEmpty title="Search response feedback" detail="Review thumbs up/down reasons linked to real agent runs." />
+        ) : null}
+        {items.map((feedback) => (
+          <button
+            type="button"
+            className={`run-result-card ${feedback.run_id === currentRunId ? "is-selected" : ""}`}
+            key={feedback.id}
+            onClick={() => onOpenFeedback(feedback)}
+            aria-pressed={feedback.run_id === currentRunId}
+          >
+            <div className="run-result-top">
+              <Badge tone={feedback.rating === "positive" ? "success" : "danger"}>{feedback.rating}</Badge>
+              <time title={feedback.created_at}>{ageLabel(feedback.created_at)}</time>
+            </div>
+            <strong>{feedback.run_id}</strong>
+            <span>{feedback.conversation_id}</span>
+            {feedback.reasons.length ? (
+              <div className="tag-row">
+                {feedback.reasons.slice(0, 4).map((reason) => (
+                  <Badge tone={feedback.rating === "negative" ? "warn" : "success"} key={reason}>
+                    {reason}
+                  </Badge>
+                ))}
+              </div>
+            ) : null}
+            {feedback.comment ? <p className="feedback-comment">{feedback.comment}</p> : null}
+            <div className="run-result-meta">
+              <span>{feedback.user_id}</span>
+              <span>{feedback.source}</span>
+              <span>{feedback.id}</span>
+            </div>
+          </button>
+        ))}
+      </div>
+    </aside>
   );
 }
 

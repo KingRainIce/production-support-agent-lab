@@ -16,6 +16,7 @@ DEFAULT_USER_SCOPES = [
     "shipping:read",
     "ticket:write",
     "kb:read",
+    "feedback:write",
 ]
 DEFAULT_ADMIN_SCOPES = [
     *DEFAULT_USER_SCOPES,
@@ -25,6 +26,7 @@ DEFAULT_ADMIN_SCOPES = [
     "eval:read",
     "events:read",
     "eval:run",
+    "feedback:read",
     "knowledge:diagnose",
     "memory:replay",
     "monitor:read",

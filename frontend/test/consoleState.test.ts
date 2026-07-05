@@ -78,6 +78,16 @@ describe("console URL state", () => {
     expect(parseConsoleState("workspace=memory&tab=memory")).toEqual(original);
   });
 
+  it("roundtrips the feedback workspace", () => {
+    const original: ConsoleUrlState = {
+      ...DEFAULT_CONSOLE_URL_STATE,
+      workspace: "feedback"
+    };
+
+    expect(serializeConsoleState(original)).toBe("workspace=feedback");
+    expect(parseConsoleState("workspace=feedback")).toEqual(original);
+  });
+
   it("falls back to safe defaults for invalid URL values", () => {
     const state = parseConsoleState(
       "?workspace=metrics&tab=raw&severity=P9&status=done&sort=random&new=0"
