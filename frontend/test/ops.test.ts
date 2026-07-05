@@ -675,6 +675,18 @@ describe("ops workbench helpers", () => {
     expect(stats.mttaSeconds).toBeNull();
   });
 
+  it("keeps monitor triage health stable when severity buckets are omitted", () => {
+    const stats = buildMonitorTriageHealthStats(
+      triageMetrics({
+        active_alert_count: 2,
+        active_by_severity: undefined
+      })
+    );
+
+    expect(stats.activeAlerts).toBe(2);
+    expect(stats.p0p1Alerts).toBe(0);
+  });
+
   it("normalizes alert delivery summary for monitor workbench display", () => {
     expect(buildMonitorAlertDeliveryStats(null)).toMatchObject({
       status: "unknown",

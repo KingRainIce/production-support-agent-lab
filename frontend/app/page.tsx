@@ -83,6 +83,7 @@ import type {
   IncidentRunBundle,
   JsonValue,
   KnowledgeSearchResponse,
+  MemoryReplayResult,
   MonitorAlert,
   MonitorDrilldownResponse,
   MonitorEvent,
@@ -180,12 +181,11 @@ type TimelineStep = {
 };
 
 export default function Home() {
-  const [initialConsoleState] = useState(readInitialConsoleState);
   const [snapshot, setSnapshot] = useState<ConsoleSnapshot | null>(null);
-  const [selectedRunId, setSelectedRunId] = useState<string | null>(initialConsoleState.runId);
-  const [selectedAlertKey, setSelectedAlertKey] = useState<string | null>(initialConsoleState.alertKey);
-  const [workspaceMode, setWorkspaceMode] = useState<WorkspaceMode>(initialConsoleState.workspace);
-  const [runQuery, setRunQuery] = useState(initialConsoleState.runId ?? "");
+  const [selectedRunId, setSelectedRunId] = useState<string | null>(DEFAULT_CONSOLE_URL_STATE.runId);
+  const [selectedAlertKey, setSelectedAlertKey] = useState<string | null>(DEFAULT_CONSOLE_URL_STATE.alertKey);
+  const [workspaceMode, setWorkspaceMode] = useState<WorkspaceMode>(DEFAULT_CONSOLE_URL_STATE.workspace);
+  const [runQuery, setRunQuery] = useState(DEFAULT_CONSOLE_URL_STATE.runId ?? "");
   const [runSearchQuery, setRunSearchQuery] = useState("");
   const [runSearchUserId, setRunSearchUserId] = useState("");
   const [runSearchConversationId, setRunSearchConversationId] = useState("");
@@ -215,6 +215,11 @@ export default function Home() {
   const [knowledgeTrace, setKnowledgeTrace] = useState<KnowledgeSearchResponse | null>(null);
   const [knowledgeLoading, setKnowledgeLoading] = useState(false);
   const [knowledgeError, setKnowledgeError] = useState<string | null>(null);
+  const [memoryConversationId, setMemoryConversationId] = useState("");
+  const [memoryLimit, setMemoryLimit] = useState("0");
+  const [memoryReplay, setMemoryReplay] = useState<MemoryReplayResult | null>(null);
+  const [memoryLoading, setMemoryLoading] = useState(false);
+  const [memoryError, setMemoryError] = useState<string | null>(null);
   const [eventBackupLabel, setEventBackupLabel] = useState("manual");
   const [eventBackupReport, setEventBackupReport] = useState<SQLiteBackupReport | null>(null);
   const [eventOpsBusy, setEventOpsBusy] = useState<string | null>(null);
@@ -228,11 +233,11 @@ export default function Home() {
   const [retentionIncludeEvents, setRetentionIncludeEvents] = useState(false);
   const [retentionVacuum, setRetentionVacuum] = useState(false);
   const [retentionApplyConfirmed, setRetentionApplyConfirmed] = useState(false);
-  const [severityFilter, setSeverityFilter] = useState(initialConsoleState.severity);
-  const [statusFilter, setStatusFilter] = useState<AlertStatusFilter>(initialConsoleState.status);
-  const [queueQuery, setQueueQuery] = useState(initialConsoleState.query);
-  const [queueSort, setQueueSort] = useState<AlertSort>(initialConsoleState.sort);
-  const [onlyNewAlerts, setOnlyNewAlerts] = useState(initialConsoleState.onlyNew);
+  const [severityFilter, setSeverityFilter] = useState(DEFAULT_CONSOLE_URL_STATE.severity);
+  const [statusFilter, setStatusFilter] = useState<AlertStatusFilter>(DEFAULT_CONSOLE_URL_STATE.status);
+  const [queueQuery, setQueueQuery] = useState(DEFAULT_CONSOLE_URL_STATE.query);
+  const [queueSort, setQueueSort] = useState<AlertSort>(DEFAULT_CONSOLE_URL_STATE.sort);
+  const [onlyNewAlerts, setOnlyNewAlerts] = useState(DEFAULT_CONSOLE_URL_STATE.onlyNew);
   const [alertWorkbenchView, setAlertWorkbenchView] = useState<AlertWorkbenchView>("queue");
   const [deliveryStatusFilter, setDeliveryStatusFilter] = useState<AlertDeliveryStatusFilter>("dead");
   const [alertDeliveries, setAlertDeliveries] = useState<AlertDeliveryRecord[]>([]);
@@ -251,7 +256,7 @@ export default function Home() {
   const [regressionDraftLoadingId, setRegressionDraftLoadingId] = useState<string | null>(null);
   const [regressionDraftError, setRegressionDraftError] = useState<string | null>(null);
   const [copiedRegressionDraft, setCopiedRegressionDraft] = useState(false);
-  const [evidenceTab, setEvidenceTab] = useState<EvidenceTab>(initialConsoleState.tab);
+  const [evidenceTab, setEvidenceTab] = useState<EvidenceTab>(DEFAULT_CONSOLE_URL_STATE.tab);
   const [expandedSteps, setExpandedSteps] = useState<Set<TimelineStepId>>(
     () => new Set(["message", "retrieval", "monitor"])
   );
@@ -265,6 +270,7 @@ export default function Home() {
   const [loading, setLoading] = useState(true);
   const [actionBusy, setActionBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [urlStateReady, setUrlStateReady] = useState(false);
 
   const loadSnapshot = useCallback(async (input: LoadInput = {}) => {
     setLoading(true);
@@ -297,13 +303,28 @@ export default function Home() {
   }, []);
 
   useEffect(() => {
-    void loadSnapshot({
-      runId: initialConsoleState.runId,
-      alertKey: initialConsoleState.alertKey
-    });
-  }, [initialConsoleState.alertKey, initialConsoleState.runId, loadSnapshot]);
+    if (typeof window === "undefined") {
+      return;
+    }
+    const nextState = readInitialConsoleState();
+    setSelectedRunId(nextState.runId);
+    setSelectedAlertKey(nextState.alertKey);
+    setWorkspaceMode(nextState.workspace);
+    setEvidenceTab(nextState.tab);
+    setSeverityFilter(nextState.severity);
+    setStatusFilter(nextState.status);
+    setQueueQuery(nextState.query);
+    setQueueSort(nextState.sort);
+    setOnlyNewAlerts(nextState.onlyNew);
+    setRunQuery(nextState.runId ?? "");
+    setUrlStateReady(true);
+    void loadSnapshot({ runId: nextState.runId, alertKey: nextState.alertKey });
+  }, [loadSnapshot]);
 
   useEffect(() => {
+    if (!urlStateReady) {
+      return;
+    }
     syncConsoleUrl({
       runId: selectedRunId,
       alertKey: selectedAlertKey,
@@ -324,7 +345,8 @@ export default function Home() {
     selectedRunId,
     severityFilter,
     statusFilter,
-    workspaceMode
+    workspaceMode,
+    urlStateReady
   ]);
 
   useEffect(() => {
@@ -751,6 +773,57 @@ export default function Home() {
     void searchKnowledge();
   }
 
+  async function replayConversationMemory(
+    nextConversationId = memoryConversationId,
+    nextLimit = memoryLimit
+  ) {
+    const trimmed = nextConversationId.trim();
+    if (!trimmed) {
+      setMemoryError("Enter a conversation id before replaying memory.");
+      return;
+    }
+    setMemoryLoading(true);
+    setMemoryError(null);
+    try {
+      const response = await fetch("/api/console/memory/replay", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        cache: "no-store",
+        body: JSON.stringify({
+          conversationId: trimmed,
+          limit: Number(nextLimit)
+        })
+      });
+      const data = await response.json();
+      if (!response.ok) {
+        throw new Error(data.detail ?? "Memory replay failed");
+      }
+      setMemoryConversationId(trimmed);
+      setMemoryLimit(nextLimit);
+      setMemoryReplay(data as MemoryReplayResult);
+      setEvidenceTab("memory");
+    } catch (nextError) {
+      setMemoryError(nextError instanceof Error ? nextError.message : "Memory replay failed");
+    } finally {
+      setMemoryLoading(false);
+    }
+  }
+
+  function submitMemoryReplay(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    void replayConversationMemory();
+  }
+
+  function loadCurrentRunMemory() {
+    const conversationId = run?.conversation_id ?? snapshot?.incident?.run.conversation_id ?? "";
+    if (!conversationId) {
+      setMemoryError("The selected run has no conversation id.");
+      return;
+    }
+    setMemoryConversationId(conversationId);
+    void replayConversationMemory(conversationId, memoryLimit);
+  }
+
   async function createEventStoreBackup() {
     setEventOpsBusy("backup");
     setEventOpsError(null);
@@ -1053,7 +1126,13 @@ export default function Home() {
             }
           }
           if (target === "memory") {
+            setWorkspaceMode("memory");
             setEvidenceTab("memory");
+            const currentConversationId = snapshot?.incident?.run.conversation_id ?? "";
+            if (currentConversationId && !memoryReplay && !memoryLoading) {
+              setMemoryConversationId(currentConversationId);
+              void replayConversationMemory(currentConversationId, memoryLimit);
+            }
           }
           if (target === "alerts") {
             setWorkspaceMode("alerts");
@@ -1237,6 +1316,19 @@ export default function Home() {
               onSubmit={submitKnowledgeSearch}
               onSearch={searchKnowledge}
               onUseCurrent={loadCurrentRunRetrieval}
+            />
+          ) : workspaceMode === "memory" ? (
+            <MemoryReplayWorkbenchPanel
+              replay={memoryReplay}
+              loading={memoryLoading}
+              error={memoryError}
+              conversationId={memoryConversationId}
+              limit={memoryLimit}
+              currentConversationId={run?.conversation_id ?? null}
+              onConversationId={setMemoryConversationId}
+              onLimit={setMemoryLimit}
+              onSubmit={submitMemoryReplay}
+              onUseCurrent={loadCurrentRunMemory}
             />
           ) : workspaceMode === "settings" ? (
             <SettingsWorkbenchPanel
@@ -2128,6 +2220,156 @@ function AlertDeliveryLedger({
   );
 }
 
+function MemoryReplayWorkbenchPanel({
+  replay,
+  loading,
+  error,
+  conversationId,
+  limit,
+  currentConversationId,
+  onConversationId,
+  onLimit,
+  onSubmit,
+  onUseCurrent
+}: {
+  replay: MemoryReplayResult | null;
+  loading: boolean;
+  error: string | null;
+  conversationId: string;
+  limit: string;
+  currentConversationId: string | null;
+  onConversationId: (value: string) => void;
+  onLimit: (value: string) => void;
+  onSubmit: (event: FormEvent<HTMLFormElement>) => void;
+  onUseCurrent: () => void;
+}) {
+  const messages = replay?.state.messages ?? [];
+  const facts = Object.entries(replay?.state.facts ?? {});
+  return (
+    <aside className="alerts-panel run-workbench memory-workbench">
+      <div className="panel-heading">
+        <div>
+          <span>Memory Replay</span>
+          <strong>{replay ? replay.conversation_id : currentConversationId ?? "No conversation selected"}</strong>
+        </div>
+      </div>
+
+      <form className="run-search-form memory-replay-form" onSubmit={onSubmit}>
+        <label className="field-label compact">
+          Conversation ID
+          <input
+            value={conversationId}
+            onChange={(event) => onConversationId(event.target.value)}
+            placeholder="conv_..."
+          />
+        </label>
+        <div className="tool-window-grid">
+          <label className="field-label compact">
+            Event limit
+            <input
+              value={limit}
+              onChange={(event) => onLimit(event.target.value)}
+              placeholder="0 = backend default"
+            />
+          </label>
+          <button
+            className="secondary-button"
+            type="button"
+            disabled={!currentConversationId || loading}
+            onClick={onUseCurrent}
+          >
+            <Database size={16} />
+            Current run
+          </button>
+        </div>
+        <button className="primary-button" type="submit" disabled={loading || !conversationId.trim()}>
+          {loading ? <Loader2 className="spin" size={16} /> : <Search size={16} />}
+          Replay memory
+        </button>
+      </form>
+
+      <div className={error ? "inline-error" : "sr-only"} role="status" aria-live="polite">
+        {error ?? (replay ? `${messages.length} memory messages replayed` : "Memory replay status")}
+      </div>
+
+      {loading && !replay ? <LoadingBlock /> : null}
+      {replay ? (
+        <>
+          <div className="run-search-stats memory-replay-stats" aria-label="Memory replay stats">
+            <Metric label="Events" value={String(replay.event_count)} />
+            <Metric label="Messages" value={String(replay.replayed_message_count)} />
+            <Metric label="Runs" value={String(replay.replayed_run_count)} />
+            <Metric label="Ignored" value={String(replay.ignored_event_count)} />
+          </div>
+
+          <section className="memory-replay-section">
+            <div className="settings-section-head">
+              <strong>Facts</strong>
+              <Badge tone={facts.length ? "success" : "neutral"}>{facts.length}</Badge>
+            </div>
+            {facts.length ? (
+              <div className="memory-fact-list">
+                {facts.map(([key, value]) => (
+                  <div key={key}>
+                    <span>{key}</span>
+                    <strong>{stringifyValue(value as JsonValue)}</strong>
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <PanelEmpty title="No facts" detail="Replay returned no extracted conversation facts." />
+            )}
+          </section>
+
+          <section className="memory-replay-section">
+            <div className="settings-section-head">
+              <strong>Working Summary</strong>
+              <Badge tone={replay.state.working_summary ? "success" : "neutral"}>
+                {replay.state.last_intent ?? "unknown"}
+              </Badge>
+            </div>
+            <p className="summary-copy">{replay.state.working_summary || "No working summary stored."}</p>
+            {replay.state.open_questions.length ? (
+              <div className="memory-open-questions">
+                {replay.state.open_questions.map((question) => (
+                  <span key={question}>{question}</span>
+                ))}
+              </div>
+            ) : null}
+          </section>
+
+          <section className="memory-replay-section">
+            <div className="settings-section-head">
+              <strong>Messages</strong>
+              <Badge>{messages.length}</Badge>
+            </div>
+            {messages.length ? (
+              <div className="memory-message-list">
+                {messages.slice(-8).map((message, index) => (
+                  <article
+                    className={`memory-message-row role-${message.role}`}
+                    key={`${message.created_at}-${index}`}
+                  >
+                    <Badge tone={message.role === "assistant" ? "success" : message.role === "user" ? "warn" : "neutral"}>
+                      {message.role}
+                    </Badge>
+                    <span>{message.content}</span>
+                    <time>{formatTime(message.created_at)}</time>
+                  </article>
+                ))}
+              </div>
+            ) : (
+              <PanelEmpty title="No messages" detail="Replay found no stored user or assistant messages." />
+            )}
+          </section>
+        </>
+      ) : !loading ? (
+        <PanelEmpty title="Replay conversation memory" detail="Enter a conversation id or use the selected run." />
+      ) : null}
+    </aside>
+  );
+}
+
 function SettingsWorkbenchPanel({
   backupLabel,
   backupReport,
@@ -2618,8 +2860,8 @@ function MonitorDrilldownPanel({
                 <div className="tag-row">
                   <Badge>{event.user_intent}</Badge>
                   <Badge>{event.conversation_id}</Badge>
-                  {event.failure_types.slice(0, 3).map((failure) => (
-                    <Badge tone="warn" key={failure}>
+                  {event.failure_types.slice(0, 3).map((failure, index) => (
+                    <Badge tone="warn" key={`${event.id}-${failure}-${index}`}>
                       {failure}
                     </Badge>
                   ))}
@@ -3051,8 +3293,11 @@ function KnowledgeWorkbenchPanel({
         {!trace && !loading ? (
           <PanelEmpty title="Search knowledge base" detail="Run a query or open a run with retrieval evidence." />
         ) : null}
-        {hits.map((hit) => (
-          <article className="run-result-card knowledge-hit-card" key={hit.chunk_id}>
+        {hits.map((hit, index) => (
+          <article
+            className="run-result-card knowledge-hit-card"
+            key={`${hit.document_id}-${hit.chunk_id}-${index}`}
+          >
             <div className="run-result-top">
               <Badge tone={hit.score >= 1 ? "success" : "neutral"}>{hit.score.toFixed(2)}</Badge>
               <span>{hit.source_uri || "no source"}</span>
@@ -3357,8 +3602,8 @@ function TimelineCard({
             <strong>{step.title}</strong>
           </div>
           <div className="chip-row">
-            {step.chips.slice(0, 3).map((chip) => (
-              <Badge key={chip}>{chip}</Badge>
+            {step.chips.slice(0, 3).map((chip, index) => (
+              <Badge key={`${step.id}-${chip}-${index}`}>{chip}</Badge>
             ))}
             {expanded ? <ChevronDown size={17} /> : <ChevronRight size={17} />}
           </div>
@@ -3699,7 +3944,7 @@ function CitationsPanel({
         </div>
         {hits.length ? (
           hits.map((hit, index) => (
-            <article className="citation-row" key={`${hit.document_id}-${hit.chunk_id}`}>
+            <article className="citation-row" key={`${hit.document_id}-${hit.chunk_id}-${index}`}>
               <div className="index-badge">{index + 1}</div>
               <div>
                 <strong>{hit.title}</strong>
@@ -3751,8 +3996,8 @@ function CitationsPanel({
               </span>
               {event.failure_types.length ? (
                 <div className="tag-row">
-                  {event.failure_types.map((failure) => (
-                    <Badge tone="warn" key={failure}>
+                  {event.failure_types.map((failure, index) => (
+                    <Badge tone="warn" key={`${event.id}-${failure}-${index}`}>
                       {failure}
                     </Badge>
                   ))}
@@ -4215,8 +4460,8 @@ function buildTimeline(incident: IncidentRunBundle | null): TimelineStep[] {
         <div className="detail-block">
           <KeyValues values={run.retrieval?.candidates_by_stage ?? {}} />
           <div className="tag-row">
-            {(run.retrieval?.selected_sources ?? []).map((source) => (
-              <Badge key={source}>{source}</Badge>
+            {(run.retrieval?.selected_sources ?? []).map((source, index) => (
+              <Badge key={`${source}-${index}`}>{source}</Badge>
             ))}
           </div>
         </div>

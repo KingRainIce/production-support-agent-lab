@@ -67,6 +67,8 @@ real local FastAPI endpoints:
    creates a verified SQLite backup.
 13. `POST /api/v1/admin/event-store/retention` when the `Settings` workbench
    previews or applies the conservative retention policy.
+14. `GET /api/v1/admin/conversations/{conversation_id}/memory/replay` when
+   the `Memory` workbench rebuilds a conversation from append-only events.
 
 ## Production Run
 
@@ -142,6 +144,10 @@ machine.
   sends operator queries through the BFF, returns snippets instead of full
   document bodies, and exposes rewrite queries, stage counts, selected sources,
   dropped candidates, and top-score signals for recall debugging.
+- Memory workbench backed by the append-only event store. It accepts any
+  conversation id, calls the backend replay endpoint through the BFF, and shows
+  rebuilt facts, working summary, open questions, recent messages, replayed
+  run count, and ignored event count without mutating live memory.
 - Settings workbench for release and event-store operations. It expands the
   read-only promotion gate into per-check readiness, monitor, tool-audit, and
   eval evidence; it also creates verified backups through a label-only BFF
@@ -202,22 +208,25 @@ memory, safety, monitoring, and incident response.
    suspected idempotency issue; open any audit row to hydrate its full run.
 7. Switch to `Knowledge` when the answer has weak citations, missing grounding,
    or a suspected recall/rerank/query-rewrite issue.
-8. Use alert search to find a run, owner, alert reason, or event id.
-9. Assign the alert before investigation so ownership is explicit.
-10. Copy the browser URL when handing off to another operator; it preserves the
+8. Switch to `Memory` when a later turn forgot facts, merged the wrong order,
+   or behaved differently after a restart. Use `Current run` to replay the
+   active conversation, or paste any conversation id from a support ticket.
+9. Use alert search to find a run, owner, alert reason, or event id.
+10. Assign the alert before investigation so ownership is explicit.
+11. Copy the browser URL when handing off to another operator; it preserves the
    selected run, alert, workspace, evidence tab, and queue filters.
-11. Open `Brief` first for the operator summary and recommended next actions.
-12. Drill into `Citations`, `Tool Audit`, and `Memory` only when the brief points
+12. Open `Brief` first for the operator summary and recommended next actions.
+13. Drill into `Citations`, `Tool Audit`, and `Memory` only when the brief points
    at missing grounding, tool failures, or replay questions.
-13. In `Drilldown`, select the monitor event and use `Draft eval` to preview a
+14. In `Drilldown`, select the monitor event and use `Draft eval` to preview a
    regression case. The backend chooses the closest file, such as
    `security_regression.json` or `tool_failure_regression.json`, and validates
    the draft against the strict eval schema.
-14. Run the eval gate in local/staging before promoting prompt, routing, tool, or
+15. Run the eval gate in local/staging before promoting prompt, routing, tool, or
    policy changes. Check the persisted history row so the reviewer can see who
    ran it, when, against which run/alert context, and whether any cases failed.
-15. Use `Settings` before release: inspect `Release Preflight` and do not
+16. Use `Settings` before release: inspect `Release Preflight` and do not
    promote while readiness, monitor, tool-audit, or eval checks are blocked.
-16. Use `Settings` before manual cleanup: create a verified backup, preview
+17. Use `Settings` before manual cleanup: create a verified backup, preview
    retention, then apply only after reviewing the table-level candidate counts.
-17. Resolve only after the triage note explains customer impact and mitigation.
+18. Resolve only after the triage note explains customer impact and mitigation.

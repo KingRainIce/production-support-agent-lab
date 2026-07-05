@@ -278,7 +278,7 @@ export type MonitorTriageMetricsResponse = {
   stale_active_alert_count: number;
   stale_threshold_seconds: number;
   by_severity: Record<"P0" | "P1" | "P2" | "P3", number>;
-  active_by_severity: Record<"P0" | "P1" | "P2" | "P3", number>;
+  active_by_severity?: Partial<Record<"P0" | "P1" | "P2" | "P3", number>>;
   by_status: Record<string, number>;
   worst_active_severity: "P0" | "P1" | "P2" | "P3" | null;
   health_status: "ok" | "degraded" | "critical";

@@ -351,7 +351,7 @@ export function buildMonitorTriageHealthStats(metrics: MonitorTriageMetricsRespo
     unassignedActiveAlerts: metrics.unassigned_active_alert_count,
     newEventsSinceTriage: metrics.new_events_since_triage_count,
     staleActiveAlerts: metrics.stale_active_alert_count,
-    p0p1Alerts: (metrics.active_by_severity.P0 ?? 0) + (metrics.active_by_severity.P1 ?? 0),
+    p0p1Alerts: (metrics.active_by_severity?.P0 ?? 0) + (metrics.active_by_severity?.P1 ?? 0),
     mttaSeconds: metrics.mtta_seconds,
     mttrSeconds: metrics.mttr_seconds,
     oldestActiveAlertAt: metrics.oldest_active_alert_at

@@ -67,6 +67,17 @@ describe("console URL state", () => {
     expect(parseConsoleState("workspace=settings")).toEqual(original);
   });
 
+  it("roundtrips the memory workspace", () => {
+    const original: ConsoleUrlState = {
+      ...DEFAULT_CONSOLE_URL_STATE,
+      workspace: "memory",
+      tab: "memory"
+    };
+
+    expect(serializeConsoleState(original)).toBe("workspace=memory&tab=memory");
+    expect(parseConsoleState("workspace=memory&tab=memory")).toEqual(original);
+  });
+
   it("falls back to safe defaults for invalid URL values", () => {
     const state = parseConsoleState(
       "?workspace=metrics&tab=raw&severity=P9&status=done&sort=random&new=0"
