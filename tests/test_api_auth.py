@@ -2513,6 +2513,7 @@ def test_production_audit_export_requires_audit_and_events_scopes(tmp_path, monk
 
 def test_admin_can_preview_and_apply_event_store_retention(tmp_path, monkeypatch):
     monkeypatch.setenv("APP_DATABASE_URL", f"sqlite:///{tmp_path / 'events.db'}")
+    monkeypatch.setenv("APP_EVENT_STORE_BACKUP_DIR", str(tmp_path / "backups"))
     get_settings.cache_clear()
     app_container = create_container()
     event_store = app_container.event_store
@@ -2558,13 +2559,49 @@ def test_admin_can_preview_and_apply_event_store_retention(tmp_path, monkeypatch
             "/api/v1/admin/event-store/retention",
             json={"dry_run": True},
         )
+        unsafe_apply = client.post(
+            "/api/v1/admin/event-store/retention",
+            headers={"X-Demo-Role": "admin"},
+            json={
+                "dry_run": False,
+                "include_events": True,
+                "event_retention_days": 365,
+                "tool_audit_retention_days": 180,
+            },
+        )
+        events_after_unsafe_apply = event_store.list_events(
+            tenant_id="demo_tenant",
+            conversation_id="conv_retention_api",
+        )
+        audit_after_unsafe_apply = event_store.list_tool_audit_records(
+            trace_id="trace_retention_api",
+        )
+        backup = client.post(
+            "/api/v1/admin/event-store/backups",
+            headers={"X-Demo-Role": "admin"},
+            json={"label": "retention-api"},
+        )
         preview = client.post(
             "/api/v1/admin/event-store/retention",
             headers={"X-Demo-Role": "admin"},
             json={
                 "dry_run": True,
+                "include_events": True,
                 "event_retention_days": 365,
                 "tool_audit_retention_days": 180,
+            },
+        )
+        mismatched_apply = client.post(
+            "/api/v1/admin/event-store/retention",
+            headers={"X-Demo-Role": "admin"},
+            json={
+                "dry_run": False,
+                "include_events": False,
+                "event_retention_days": 365,
+                "tool_audit_retention_days": 180,
+                "backup_token": backup.json()["backup_token"],
+                "preview_token": preview.json()["preview_token"],
+                "apply_confirmed": True,
             },
         )
         applied = client.post(
@@ -2575,6 +2612,9 @@ def test_admin_can_preview_and_apply_event_store_retention(tmp_path, monkeypatch
                 "include_events": True,
                 "event_retention_days": 365,
                 "tool_audit_retention_days": 180,
+                "backup_token": backup.json()["backup_token"],
+                "preview_token": preview.json()["preview_token"],
+                "apply_confirmed": True,
             },
         )
     finally:
@@ -2582,11 +2622,21 @@ def test_admin_can_preview_and_apply_event_store_retention(tmp_path, monkeypatch
         get_settings.cache_clear()
 
     assert forbidden.status_code == 403
+    assert unsafe_apply.status_code == 409
+    assert "backup" in unsafe_apply.json()["detail"].lower()
+    assert events_after_unsafe_apply
+    assert audit_after_unsafe_apply
+    assert backup.status_code == 200
+    assert backup.json()["verified"] is True
+    assert backup.json()["backup_token"]
     assert preview.status_code == 200
     preview_body = preview.json()
     assert preview_body["dry_run"] is True
     assert preview_body["total_candidates"] == 2
     assert preview_body["total_deleted"] == 0
+    assert preview_body["preview_token"]
+    assert mismatched_apply.status_code == 409
+    assert "parameters changed" in mismatched_apply.json()["detail"]
     assert applied.status_code == 200
     applied_body = applied.json()
     assert applied_body["dry_run"] is False
@@ -2594,6 +2644,91 @@ def test_admin_can_preview_and_apply_event_store_retention(tmp_path, monkeypatch
     assert applied_body["total_deleted"] == 2
     assert event_store.list_events(tenant_id="demo_tenant", conversation_id="conv_retention_api") == []
     assert event_store.list_tool_audit_records(trace_id="trace_retention_api") == []
+
+
+def test_event_store_retention_apply_rejects_changed_store_after_preview(tmp_path, monkeypatch):
+    monkeypatch.setenv("APP_DATABASE_URL", f"sqlite:///{tmp_path / 'events.db'}")
+    monkeypatch.setenv("APP_EVENT_STORE_BACKUP_DIR", str(tmp_path / "backups"))
+    get_settings.cache_clear()
+    app_container = create_container()
+    event_store = app_container.event_store
+    assert event_store is not None
+    old = utc_now() - timedelta(days=400)
+    old_event = event_store.append(
+        tenant_id="demo_tenant",
+        conversation_id="conv_retention_stale_preview",
+        user_id="user_demo",
+        event_type="message.user",
+        payload={
+            "id": "msg_retention_stale_preview",
+            "tenant_id": "demo_tenant",
+            "conversation_id": "conv_retention_stale_preview",
+            "user_id": "user_demo",
+            "role": "user",
+            "content": "old event",
+            "created_at": old.isoformat(),
+            "metadata": {},
+        },
+    )
+    with event_store._connect() as conn:
+        conn.execute("update events set created_at = ? where id = ?", (old.isoformat(), old_event.id))
+    app.dependency_overrides[get_container] = lambda: app_container
+    try:
+        client = TestClient(app)
+        backup = client.post(
+            "/api/v1/admin/event-store/backups",
+            headers={"X-Demo-Role": "admin"},
+            json={"label": "stale-preview"},
+        )
+        preview = client.post(
+            "/api/v1/admin/event-store/retention",
+            headers={"X-Demo-Role": "admin"},
+            json={
+                "dry_run": True,
+                "include_events": True,
+                "event_retention_days": 365,
+            },
+        )
+        event_store.append(
+            tenant_id="demo_tenant",
+            conversation_id="conv_retention_new_after_preview",
+            user_id="user_demo",
+            event_type="message.user",
+            payload={
+                "id": "msg_retention_new_after_preview",
+                "tenant_id": "demo_tenant",
+                "conversation_id": "conv_retention_new_after_preview",
+                "user_id": "user_demo",
+                "role": "user",
+                "content": "new event after preview",
+                "created_at": utc_now().isoformat(),
+                "metadata": {},
+            },
+        )
+        stale_apply = client.post(
+            "/api/v1/admin/event-store/retention",
+            headers={"X-Demo-Role": "admin"},
+            json={
+                "dry_run": False,
+                "include_events": True,
+                "event_retention_days": 365,
+                "backup_token": backup.json()["backup_token"],
+                "preview_token": preview.json()["preview_token"],
+                "apply_confirmed": True,
+            },
+        )
+    finally:
+        app.dependency_overrides.clear()
+        get_settings.cache_clear()
+
+    assert backup.status_code == 200
+    assert preview.status_code == 200
+    assert stale_apply.status_code == 409
+    assert "changed since retention preview" in stale_apply.json()["detail"]
+    assert event_store.list_events(
+        tenant_id="demo_tenant",
+        conversation_id="conv_retention_stale_preview",
+    )
 
 
 def test_admin_can_create_event_store_backup_in_configured_directory(tmp_path, monkeypatch):
@@ -2612,7 +2747,7 @@ def test_admin_can_create_event_store_backup_in_configured_directory(tmp_path, m
         allowed = client.post(
             "/api/v1/admin/event-store/backups",
             headers={"X-Demo-Role": "admin"},
-            json={"label": "../../release one"},
+            json={"label": "../../release one", "verify": False},
         )
     finally:
         app.dependency_overrides.clear()
@@ -2623,6 +2758,9 @@ def test_admin_can_create_event_store_backup_in_configured_directory(tmp_path, m
     body = allowed.json()
     backup_path = Path(body["backup_path"]).resolve()
     assert body["verified"] is True
+    assert body["backup_token"]
+    assert "quick_check=ok" in body["verification_detail"]
+    assert "skipped" not in body["verification_detail"]
     assert backup_path.exists()
     assert str(backup_path).startswith(str(backup_dir.resolve()))
     assert ".." not in backup_path.name
@@ -2690,6 +2828,7 @@ def test_production_event_store_backup_requires_admin_write_scope(tmp_path, monk
     assert missing_write.json()["detail"] == "Missing required scope: admin:write"
     assert allowed.status_code == 200
     assert allowed.json()["verified"] is True
+    assert allowed.json()["backup_token"]
 
 
 def test_admin_can_read_monitor_summary():

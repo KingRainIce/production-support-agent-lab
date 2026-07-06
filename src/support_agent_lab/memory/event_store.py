@@ -124,6 +124,7 @@ class SQLiteBackupReport(BaseModel):
     completed_at: datetime
     verified: bool
     verification_detail: str
+    backup_token: str | None = None
 
 
 class RetentionTableReport(BaseModel):
@@ -146,6 +147,7 @@ class EventStoreRetentionReport(BaseModel):
     tables: list[RetentionTableReport]
     total_candidates: int
     total_deleted: int
+    preview_token: str | None = None
 
 
 EVAL_GATE_EVENT_TYPE = "eval.gate.completed"
@@ -1257,6 +1259,40 @@ class SQLiteEventStore:
             verification_detail=verification_detail,
         )
 
+    def retention_high_water_mark(self, *, tenant_id: str) -> dict[str, dict[str, Any]]:
+        scope_prefix = f"{tenant_id}:"
+        with self._connect() as conn:
+            return {
+                "tool_idempotency": self._table_high_water_mark(
+                    conn,
+                    table_name="tool_idempotency",
+                    where_sql="substr(scope_key, 1, ?) = ?",
+                    params=[len(scope_prefix), scope_prefix],
+                    timestamp_columns=["updated_at"],
+                ),
+                "tool_audit_records": self._table_high_water_mark(
+                    conn,
+                    table_name="tool_audit_records",
+                    where_sql="tenant_id = ?",
+                    params=[tenant_id],
+                    timestamp_columns=["created_at"],
+                ),
+                "alert_delivery_outbox": self._table_high_water_mark(
+                    conn,
+                    table_name="alert_delivery_outbox",
+                    where_sql="tenant_id = ?",
+                    params=[tenant_id],
+                    timestamp_columns=["created_at", "updated_at"],
+                ),
+                "events": self._table_high_water_mark(
+                    conn,
+                    table_name="events",
+                    where_sql="tenant_id = ?",
+                    params=[tenant_id],
+                    timestamp_columns=["created_at"],
+                ),
+            }
+
     def apply_retention_policy(
         self,
         *,
@@ -2090,7 +2126,34 @@ class SQLiteEventStore:
         where_sql: str,
         params: list[Any],
     ) -> int:
-        return int(conn.execute(f"select count(*) from {table_name} where {where_sql}", params).fetchone()[0])
+        row = conn.execute(
+            f"select count(*) from {table_name} where {where_sql}",
+            params,
+        ).fetchone()
+        return int(row[0])
+
+    def _table_high_water_mark(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        table_name: str,
+        where_sql: str,
+        params: list[Any],
+        timestamp_columns: list[str],
+    ) -> dict[str, Any]:
+        select_parts = [
+            "count(*) as row_count",
+            "coalesce(max(rowid), 0) as max_rowid",
+            *[f"max({column}) as max_{column}" for column in timestamp_columns],
+        ]
+        row = conn.execute(
+            f"select {', '.join(select_parts)} from {table_name} where {where_sql}",
+            params,
+        ).fetchone()
+        return {
+            key: row[key]
+            for key in row.keys()
+        }
 
     def _connect(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self.path)

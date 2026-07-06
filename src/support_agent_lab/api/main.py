@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import base64
 from collections import Counter
 from collections.abc import Callable
+import hmac
 import hashlib
 import inspect
 import json
@@ -96,7 +98,7 @@ from support_agent_lab.monitoring.alert_delivery_service import (
     run_alert_delivery_cycle,
 )
 from support_agent_lab.tools.registry import ToolAuditRecord, ToolAuditSummary
-from support_agent_lab.config import get_settings
+from support_agent_lab.config import Settings, get_settings
 
 
 class CreateSessionRequest(BaseModel):
@@ -171,6 +173,9 @@ class EventStoreRetentionRequest(BaseModel):
     tool_audit_retention_days: int | None = Field(default=None, ge=30, le=3650)
     idempotency_retention_days: int | None = Field(default=None, ge=1, le=3650)
     alert_delivery_retention_days: int | None = Field(default=None, ge=7, le=3650)
+    backup_token: str | None = Field(default=None, max_length=20000)
+    preview_token: str | None = Field(default=None, max_length=20000)
+    apply_confirmed: bool = False
 
 
 class EventStoreBackupRequest(BaseModel):
@@ -393,6 +398,8 @@ class SloReportResponse(BaseModel):
 
 PROMOTION_DECISION_EVENT_TYPE = "release.promotion.decision"
 AUDIT_EXPORT_MEDIA_TYPE = "application/x-ndjson"
+EVENT_STORE_BACKUP_TOKEN_KIND = "event_store.backup.v1"
+EVENT_STORE_RETENTION_PREVIEW_TOKEN_KIND = "event_store.retention_preview.v1"
 
 
 class PromotionDecisionRequest(BaseModel):
@@ -4080,6 +4087,267 @@ def _backup_label(value: str) -> str:
     return re.sub(r"[^a-zA-Z0-9_.-]+", "-", value.strip()).strip(".-_")[:80]
 
 
+def _event_store_retention_params(
+    body: EventStoreRetentionRequest,
+    settings: Settings,
+) -> dict[str, Any]:
+    return {
+        "include_events": body.include_events,
+        "vacuum": body.vacuum,
+        "event_retention_days": body.event_retention_days or settings.app_event_retention_days,
+        "tool_audit_retention_days": body.tool_audit_retention_days
+        or settings.app_tool_audit_retention_days,
+        "idempotency_retention_days": body.idempotency_retention_days
+        or settings.app_idempotency_retention_days,
+        "alert_delivery_retention_days": body.alert_delivery_retention_days
+        or settings.app_alert_delivery_retention_days,
+    }
+
+
+def _retention_token_secret(settings: Settings) -> bytes:
+    secret = (
+        settings.app_actor_signature_secret
+        or settings.app_internal_api_key
+        or f"local-retention-token:{settings.app_tenant_id}:{settings.app_database_url}"
+    )
+    return secret.encode("utf-8")
+
+
+def _retention_token_payload_b64(payload: dict[str, Any]) -> str:
+    canonical = json.dumps(
+        payload,
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+    return base64.urlsafe_b64encode(canonical).decode("ascii").rstrip("=")
+
+
+def _sign_event_store_operation_token(
+    settings: Settings,
+    payload: dict[str, Any],
+) -> str:
+    encoded = _retention_token_payload_b64(payload)
+    signature = hmac.new(
+        _retention_token_secret(settings),
+        encoded.encode("ascii"),
+        hashlib.sha256,
+    ).hexdigest()
+    return f"psaevt.{encoded}.{signature}"
+
+
+def _decode_event_store_operation_token(
+    settings: Settings,
+    token: str | None,
+    *,
+    expected_kind: str,
+) -> dict[str, Any]:
+    if not token:
+        raise HTTPException(
+            status_code=409,
+            detail="Create a verified backup and retention preview before applying retention.",
+        )
+    try:
+        prefix, encoded, signature = token.split(".", 2)
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail="Invalid event-store operation token") from exc
+    if prefix != "psaevt":
+        raise HTTPException(status_code=409, detail="Invalid event-store operation token")
+    expected_signature = hmac.new(
+        _retention_token_secret(settings),
+        encoded.encode("ascii"),
+        hashlib.sha256,
+    ).hexdigest()
+    if not hmac.compare_digest(expected_signature, signature):
+        raise HTTPException(status_code=409, detail="Invalid event-store operation token")
+    try:
+        padded = encoded + ("=" * (-len(encoded) % 4))
+        payload = json.loads(base64.urlsafe_b64decode(padded.encode("ascii")).decode("utf-8"))
+    except (ValueError, json.JSONDecodeError) as exc:
+        raise HTTPException(status_code=409, detail="Invalid event-store operation token") from exc
+    if not isinstance(payload, dict) or payload.get("kind") != expected_kind:
+        raise HTTPException(status_code=409, detail="Invalid event-store operation token")
+    return payload
+
+
+def _retention_report_fingerprint(
+    report: EventStoreRetentionReport,
+    *,
+    params: dict[str, Any],
+    high_water_mark: dict[str, dict[str, Any]],
+    preview_now: str,
+) -> str:
+    payload = {
+        "tenant_id": report.tenant_id,
+        "params": params,
+        "preview_now": preview_now,
+        "high_water_mark": high_water_mark,
+        "total_candidates": report.total_candidates,
+        "tables": [
+            {
+                "table_name": table.table_name,
+                "cutoff_at": table.cutoff_at.isoformat() if table.cutoff_at else None,
+                "candidate_count": table.candidate_count,
+                "action": table.action,
+                "reason": table.reason,
+            }
+            for table in report.tables
+        ],
+    }
+    canonical = json.dumps(
+        payload,
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def _event_store_backup_token_payload(
+    *,
+    report: SQLiteBackupReport,
+    settings: Settings,
+    actor: RequestActor,
+    high_water_mark: dict[str, dict[str, Any]],
+) -> dict[str, Any]:
+    return {
+        "kind": EVENT_STORE_BACKUP_TOKEN_KIND,
+        "tenant_id": settings.app_tenant_id,
+        "actor_user_id": actor.user_id,
+        "source_path": report.source_path,
+        "backup_path": report.backup_path,
+        "verified": report.verified,
+        "completed_at": report.completed_at.isoformat(),
+        "size_bytes": report.size_bytes,
+        "page_count": report.page_count,
+        "high_water_mark": high_water_mark,
+    }
+
+
+def _event_store_preview_token_payload(
+    *,
+    report: EventStoreRetentionReport,
+    settings: Settings,
+    actor: RequestActor,
+    params: dict[str, Any],
+    high_water_mark: dict[str, dict[str, Any]],
+    preview_now: str,
+) -> dict[str, Any]:
+    return {
+        "kind": EVENT_STORE_RETENTION_PREVIEW_TOKEN_KIND,
+        "tenant_id": settings.app_tenant_id,
+        "actor_user_id": actor.user_id,
+        "params": params,
+        "preview_now": preview_now,
+        "high_water_mark": high_water_mark,
+        "report_fingerprint": _retention_report_fingerprint(
+            report,
+            params=params,
+            high_water_mark=high_water_mark,
+            preview_now=preview_now,
+        ),
+    }
+
+
+def _ensure_backup_path_is_valid(
+    *,
+    backup_path_value: Any,
+    backup_dir_value: str,
+) -> None:
+    backup_path = Path(str(backup_path_value)).resolve()
+    backup_dir = Path(backup_dir_value).resolve()
+    if not backup_path.exists():
+        raise HTTPException(status_code=409, detail="Verified backup file is missing; create a new backup.")
+    if not backup_path.is_file() or not backup_path.is_relative_to(backup_dir):
+        raise HTTPException(status_code=409, detail="Verified backup token is not valid for this backup directory.")
+
+
+def _assert_retention_apply_is_guarded(
+    *,
+    body: EventStoreRetentionRequest,
+    deps: AppContainer,
+    actor: RequestActor,
+    params: dict[str, Any],
+) -> datetime:
+    if not body.apply_confirmed:
+        raise HTTPException(
+            status_code=409,
+            detail="Confirm the verified backup and retention preview before applying retention.",
+        )
+    backup_payload = _decode_event_store_operation_token(
+        deps.settings,
+        body.backup_token,
+        expected_kind=EVENT_STORE_BACKUP_TOKEN_KIND,
+    )
+    preview_payload = _decode_event_store_operation_token(
+        deps.settings,
+        body.preview_token,
+        expected_kind=EVENT_STORE_RETENTION_PREVIEW_TOKEN_KIND,
+    )
+    expected_identity = {
+        "tenant_id": deps.settings.app_tenant_id,
+        "actor_user_id": actor.user_id,
+    }
+    for payload in (backup_payload, preview_payload):
+        for key, expected_value in expected_identity.items():
+            if payload.get(key) != expected_value:
+                raise HTTPException(
+                    status_code=409,
+                    detail="Event-store operation token does not match the current actor or tenant.",
+                )
+    if backup_payload.get("verified") is not True:
+        raise HTTPException(status_code=409, detail="Create a verified backup before applying retention.")
+    _ensure_backup_path_is_valid(
+        backup_path_value=backup_payload.get("backup_path"),
+        backup_dir_value=deps.settings.app_event_store_backup_dir,
+    )
+    if preview_payload.get("params") != params:
+        raise HTTPException(
+            status_code=409,
+            detail="Retention parameters changed since preview; run preview again.",
+        )
+    if backup_payload.get("high_water_mark") != preview_payload.get("high_water_mark"):
+        raise HTTPException(
+            status_code=409,
+            detail="Event store changed between backup and retention preview; create a new backup and preview.",
+        )
+    current_high_water = deps.event_store.retention_high_water_mark(
+        tenant_id=deps.settings.app_tenant_id,
+    )
+    if current_high_water != preview_payload.get("high_water_mark"):
+        raise HTTPException(
+            status_code=409,
+            detail="Event store changed since retention preview; create a new backup and preview.",
+        )
+    try:
+        preview_now = datetime.fromisoformat(str(preview_payload["preview_now"]))
+    except (KeyError, ValueError) as exc:
+        raise HTTPException(status_code=409, detail="Invalid retention preview token") from exc
+    preview_report = deps.event_store.apply_retention_policy(
+        tenant_id=deps.settings.app_tenant_id,
+        dry_run=True,
+        include_events=params["include_events"],
+        vacuum=params["vacuum"],
+        event_retention_days=params["event_retention_days"],
+        tool_audit_retention_days=params["tool_audit_retention_days"],
+        idempotency_retention_days=params["idempotency_retention_days"],
+        alert_delivery_retention_days=params["alert_delivery_retention_days"],
+        now=preview_now,
+    )
+    fingerprint = _retention_report_fingerprint(
+        preview_report,
+        params=params,
+        high_water_mark=current_high_water,
+        preview_now=preview_payload["preview_now"],
+    )
+    if fingerprint != preview_payload.get("report_fingerprint"):
+        raise HTTPException(
+            status_code=409,
+            detail="Retention candidate set changed since preview; run preview again.",
+        )
+    return preview_now
+
+
 def _unique(values) -> list[Any]:
     result: list[Any] = []
     for value in values:
@@ -5490,11 +5758,24 @@ def create_app() -> FastAPI:
         suffix = f"-{label}" if label else ""
         target_path = backup_dir / f"support-agent-lab-{tenant_label}-{timestamp}{suffix}.db"
         try:
-            return deps.event_store.backup_to(
+            report = deps.event_store.backup_to(
                 target_path,
                 overwrite=body.overwrite,
-                verify=body.verify,
+                verify=True,
             )
+            high_water_mark = deps.event_store.retention_high_water_mark(
+                tenant_id=deps.settings.app_tenant_id,
+            )
+            backup_token = _sign_event_store_operation_token(
+                deps.settings,
+                _event_store_backup_token_payload(
+                    report=report,
+                    settings=deps.settings,
+                    actor=actor,
+                    high_water_mark=high_water_mark,
+                ),
+            )
+            return report.model_copy(update={"backup_token": backup_token})
         except FileExistsError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
         except ValueError as exc:
@@ -5512,17 +5793,44 @@ def create_app() -> FastAPI:
         require_scope(actor, "events:read")
         if not deps.event_store:
             raise HTTPException(status_code=404, detail="Event store is not configured")
-        return deps.event_store.apply_retention_policy(
+        params = _event_store_retention_params(body, deps.settings)
+        apply_now: datetime | None = None
+        if not body.dry_run:
+            apply_now = _assert_retention_apply_is_guarded(
+                body=body,
+                deps=deps,
+                actor=actor,
+                params=params,
+            )
+        report = deps.event_store.apply_retention_policy(
             tenant_id=deps.settings.app_tenant_id,
             dry_run=body.dry_run,
-            include_events=body.include_events,
-            vacuum=body.vacuum,
-            event_retention_days=body.event_retention_days or deps.settings.app_event_retention_days,
-            tool_audit_retention_days=body.tool_audit_retention_days or deps.settings.app_tool_audit_retention_days,
-            idempotency_retention_days=body.idempotency_retention_days or deps.settings.app_idempotency_retention_days,
-            alert_delivery_retention_days=body.alert_delivery_retention_days
-            or deps.settings.app_alert_delivery_retention_days,
+            include_events=params["include_events"],
+            vacuum=params["vacuum"],
+            event_retention_days=params["event_retention_days"],
+            tool_audit_retention_days=params["tool_audit_retention_days"],
+            idempotency_retention_days=params["idempotency_retention_days"],
+            alert_delivery_retention_days=params["alert_delivery_retention_days"],
+            now=apply_now,
         )
+        if not body.dry_run:
+            return report
+        high_water_mark = deps.event_store.retention_high_water_mark(
+            tenant_id=deps.settings.app_tenant_id,
+        )
+        preview_now = report.started_at.isoformat()
+        preview_token = _sign_event_store_operation_token(
+            deps.settings,
+            _event_store_preview_token_payload(
+                report=report,
+                settings=deps.settings,
+                actor=actor,
+                params=params,
+                high_water_mark=high_water_mark,
+                preview_now=preview_now,
+            ),
+        )
+        return report.model_copy(update={"preview_token": preview_token})
 
     @app.get("/api/v1/admin/conversations/{conversation_id}/memory/replay")
     def replay_memory(

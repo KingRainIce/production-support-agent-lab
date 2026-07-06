@@ -711,6 +711,7 @@ export type SQLiteBackupReport = {
   completed_at: string;
   verified: boolean;
   verification_detail: string;
+  backup_token: string | null;
 };
 
 export type RetentionTableReport = {
@@ -733,6 +734,7 @@ export type EventStoreRetentionReport = {
   tables: RetentionTableReport[];
   total_candidates: number;
   total_deleted: number;
+  preview_token: string | null;
 };
 
 export type StoredEvent = {

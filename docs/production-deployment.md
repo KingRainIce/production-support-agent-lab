@@ -301,7 +301,8 @@ The same backup operation is exposed as
 `POST /api/v1/admin/event-store/backups`. The HTTP body accepts only a short
 label plus `overwrite` / `verify` flags; the backend writes under
 `APP_EVENT_STORE_BACKUP_DIR` so operators cannot choose arbitrary filesystem
-paths through the console.
+paths through the console. The HTTP API always performs verification before
+issuing a backup token, even if a caller asks to skip verification.
 
 Preview retention first:
 
@@ -330,7 +331,13 @@ The same operation is exposed as `POST /api/v1/admin/event-store/retention` for
 trusted operators with `admin:write`, `audit:read`, and `events:read`.
 The console `Settings` workbench calls both endpoints through its server-side
 BFF. Apply is gated by a verified backup, a dry-run preview, and an explicit
-operator confirmation.
+operator confirmation. The gate is enforced by the backend, not only the UI:
+`dry_run=false` must include the server-issued `backup_token`, matching
+`preview_token`, and `apply_confirmed=true`. The API validates that both tokens
+belong to the same tenant and actor, the backup file still exists under
+`APP_EVENT_STORE_BACKUP_DIR`, the retention parameters are unchanged, and the
+event-store high-water mark still matches the preview. Any mismatch returns
+`409 Conflict` without deleting rows.
 
 Monitor summary, events, and drilldown endpoints support `source=event_store`,
 `created_after`, `created_before`, and `order=desc|asc` for durable production

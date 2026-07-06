@@ -420,7 +420,7 @@ python scripts/event_store_ops.py --database-url sqlite:///./data/production/sup
 python scripts/event_store_ops.py --database-url sqlite:///./data/production/support-agent-lab.db retention --tenant-id your_real_tenant --apply
 ```
 
-`retention` 默认 dry-run，事件日志默认不会删除；只有显式加 `--include-events` 才会清理旧 message/run/monitor/eval 事件。API 版本是 `POST /api/v1/admin/event-store/retention`，需要 `admin:write`、`audit:read` 和 `events:read`。
+`retention` 默认 dry-run，事件日志默认不会删除；只有显式加 `--include-events` 才会清理旧 message/run/monitor/eval 事件。API 版本是 `POST /api/v1/admin/event-store/retention`，需要 `admin:write`、`audit:read` 和 `events:read`。真正 apply 必须带服务端签发的 verified backup token、matching dry-run preview token 和显式确认；如果预演后 event store 有新写入或状态变化，后端会返回 `409 Conflict`，要求重新备份和预演。
 
 ## Docker
 

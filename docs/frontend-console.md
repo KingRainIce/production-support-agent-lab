@@ -82,7 +82,9 @@ real local FastAPI endpoints:
 14. `POST /api/v1/admin/event-store/backups` when the `Settings` workbench
    creates a verified SQLite backup.
 15. `POST /api/v1/admin/event-store/retention` when the `Settings` workbench
-   previews or applies the conservative retention policy.
+   previews or applies the conservative retention policy. Apply calls include
+   backend-issued backup/preview tokens and explicit confirmation; the BFF
+   refuses tokenless apply requests before proxying.
 16. `GET /api/v1/admin/conversations/{conversation_id}/memory/replay` when
    the `Memory` workbench rebuilds a conversation from append-only events.
 17. `GET /api/v1/admin/feedback` and
@@ -217,8 +219,10 @@ machine.
   feedback, and eval evidence, records approve/reject/defer decisions as
   append-only audit events, downloads sanitized audit NDJSON, creates verified
   backups through a label-only BFF call, previews retention, and only enables
-  apply after a verified backup, a dry-run report, and operator confirmation.
-  The browser never sends filesystem paths to the backend.
+  apply after a verified backup, a matching dry-run report, server-issued
+  tokens, and operator confirmation. The backend repeats the same gate and
+  rejects stale previews with `409 Conflict`; the browser never sends
+  filesystem paths to the backend.
 - Service Objectives in `Settings` uses `GET /api/v1/admin/operations/slo-report`
   to display grounded rate, policy compliance, human-review pressure, active
   P0/P1 alerts, tool failure rate, negative feedback, eval freshness, MTTA, and

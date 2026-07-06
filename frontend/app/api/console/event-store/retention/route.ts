@@ -33,6 +33,19 @@ export async function POST(request: NextRequest) {
         body[field] = value;
       }
     }
+    if (body.dry_run === false) {
+      const backupToken = stringValue(payload.backup_token);
+      const previewToken = stringValue(payload.preview_token);
+      if (!backupToken || !previewToken || payload.apply_confirmed !== true) {
+        return NextResponse.json(
+          { detail: "Verified backup token, preview token, and confirmation are required." },
+          { status: 409 }
+        );
+      }
+      body.backup_token = backupToken;
+      body.preview_token = previewToken;
+      body.apply_confirmed = true;
+    }
     const response = await agentFetch<EventStoreRetentionReport>(
       "/api/v1/admin/event-store/retention",
       {
@@ -45,6 +58,10 @@ export async function POST(request: NextRequest) {
     const issue = issueFrom(error);
     return NextResponse.json({ detail: issue.detail }, { status: issue.status });
   }
+}
+
+function stringValue(value: unknown) {
+  return typeof value === "string" ? value : "";
 }
 
 function clampNumber(value: unknown, min: number, max: number) {

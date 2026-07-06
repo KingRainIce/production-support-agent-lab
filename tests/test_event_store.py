@@ -681,6 +681,41 @@ def test_event_store_creates_verified_online_backup(tmp_path):
         event_store.backup_to(tmp_path / "events.db", overwrite=True)
 
 
+def test_event_store_retention_high_water_mark_tracks_relevant_changes(tmp_path):
+    event_store = SQLiteEventStore(tmp_path / "events.db")
+    before = event_store.retention_high_water_mark(tenant_id="demo_tenant")
+
+    event_store.append(
+        tenant_id="demo_tenant",
+        conversation_id="conv_high_water",
+        user_id="user_demo",
+        event_type="message.user",
+        payload=_message_payload("msg_high_water", "conv_high_water", "track me"),
+    )
+    delivery = _alert_delivery(
+        "deliv_high_water",
+        utc_now(),
+        status=AlertDeliveryStatus.sent,
+    )
+    event_store.enqueue_alert_delivery(delivery)
+    after_insert = event_store.retention_high_water_mark(tenant_id="demo_tenant")
+    with event_store._connect() as conn:
+        conn.execute(
+            "update alert_delivery_outbox set updated_at = ? where id = ?",
+            ((utc_now() + timedelta(minutes=1)).isoformat(), delivery.id),
+        )
+    after_update = event_store.retention_high_water_mark(tenant_id="demo_tenant")
+
+    assert before["events"]["row_count"] == 0
+    assert after_insert["events"]["row_count"] >= 1
+    assert after_insert["events"]["row_count"] > before["events"]["row_count"]
+    assert after_insert["alert_delivery_outbox"]["row_count"] == 1
+    assert (
+        after_update["alert_delivery_outbox"]["max_updated_at"]
+        != after_insert["alert_delivery_outbox"]["max_updated_at"]
+    )
+
+
 def test_event_store_retention_policy_dry_run_and_apply(tmp_path):
     event_store = SQLiteEventStore(tmp_path / "events.db")
     now = utc_now()

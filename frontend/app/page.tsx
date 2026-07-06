@@ -641,6 +641,10 @@ export default function Home() {
   );
 
   useEffect(() => {
+    setRetentionApplyConfirmed(false);
+  }, [eventRetentionRequestKey]);
+
+  useEffect(() => {
     if (!triageDraftDirty) {
       setAssigneeUserId(activeAlert?.assignee_user_id ?? "");
     }
@@ -1208,7 +1212,10 @@ export default function Home() {
           event_retention_days: Number(eventRetentionDays),
           tool_audit_retention_days: Number(toolAuditRetentionDays),
           idempotency_retention_days: Number(idempotencyRetentionDays),
-          alert_delivery_retention_days: Number(alertDeliveryRetentionDays)
+          alert_delivery_retention_days: Number(alertDeliveryRetentionDays),
+          backup_token: eventBackupReport?.backup_token ?? null,
+          preview_token: eventRetentionReport?.preview_token ?? null,
+          apply_confirmed: retentionApplyConfirmed
         })
       });
       const data = await response.json();
@@ -3248,7 +3255,13 @@ function SettingsWorkbenchPanel({
   const applyBusy = busy === "retention-apply";
   const decisionBusy = busy === "promotion-decision";
   const auditExportBusy = busy === "audit-export";
-  const canApply = backupReport?.verified === true && previewReady && applyConfirmed;
+  const canApply = Boolean(
+    backupReport?.verified === true &&
+      backupReport.backup_token &&
+      previewReady &&
+      retentionReport?.preview_token &&
+      applyConfirmed
+  );
   const promotionStats = buildPromotionGateStats(promotionGate);
   const automationTone = automationPlanTone(operationsAutomation);
   const automationActions = operationsAutomation?.actions ?? [];
