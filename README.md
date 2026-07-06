@@ -154,7 +154,7 @@ http://127.0.0.1:8000/metrics
 ```
 
 `/health` 只表示进程活着。`/ready` 会检查配置和 event store；生产深探测开启时还会检查 OpenAI、业务 API `/health` 和知识库 API `/health`。
-`/metrics` 是 Prometheus text format，用于机器抓取聚合指标：HTTP 请求计数、限流决策、monitor event、monitor triage health、alert delivery outbox、tool audit、adapter circuit、LLM fallback 和 rate-limit 配置。它不输出用户、trace、alert key、triage note、工具参数或知识库正文。
+`/metrics` 是 Prometheus text format，用于机器抓取聚合指标：HTTP 请求计数、限流决策、monitor event、monitor triage health、alert delivery outbox、feedback review backlog、tool audit、adapter circuit、LLM fallback 和 rate-limit 配置。它不输出用户、trace、alert key、triage note、feedback comment、review note、工具参数或知识库正文。
 
 ### 4. 启动前端控制台
 
@@ -496,9 +496,9 @@ Eval 不只看最终回答，还检查：
 
 `/api/v1/admin/incidents/runs/{run_id}/timeline` 返回 `incident_timeline.v1`，把 append-only event、tool audit、response feedback、triage、alert delivery 和 eval gate 按时间合成一条脱敏调查线。它只输出事件类型、状态、错误码、计数、哈希化 correlation id 和紧凑 evidence，不输出用户原文、工具参数、工具 payload、检索正文、memory facts、feedback comment、feedback review note、triage note 或 delivery error text。控制台 Brief 面板会显示这条时间线，帮助值班人员先理解事故顺序，再进入 trace 细节。
 
-`/metrics` 会把同一套 monitor triage 投影导出成低基数机器指标，例如 `support_agent_monitor_triage_active_alerts`、`support_agent_monitor_triage_new_events_since_triage`、`support_agent_monitor_triage_health_status{status="critical"}`、`support_agent_monitor_triage_active_alerts_by_severity{severity="P0"}` 和 `support_agent_monitor_triage_mtta_seconds`。这些适合 Prometheus alert rule；控制台仍然负责展示具体 alert、run、事件和处置备注。
+`/metrics` 会把同一套 monitor triage 投影导出成低基数机器指标，例如 `support_agent_monitor_triage_active_alerts`、`support_agent_monitor_triage_new_events_since_triage`、`support_agent_monitor_triage_health_status{status="critical"}`、`support_agent_monitor_triage_active_alerts_by_severity{severity="P0"}` 和 `support_agent_monitor_triage_mtta_seconds`。它也会导出 feedback review backlog 的聚合指标，例如 `support_agent_feedback_review_queue_stale_unresolved` 和 `support_agent_feedback_review_queue_unassigned_unresolved`，但不会输出用户 comment、review note、run id 或 assignee。控制台仍然负责展示具体 alert、run、事件和处置备注。
 
-Prometheus 示例配置在 `deploy/prometheus/prometheus.yml`，生产告警规则在 `deploy/prometheus/support-agent-alerts.yml`，对应 runbook 在 `docs/alerting-runbook.md`。`docker compose --profile observability up --build` 会把配置和规则只读挂载进 Prometheus，把 UI 绑定到 `127.0.0.1:9090`，并保留 Prometheus lifecycle endpoint 关闭状态；默认 `docker compose up --build` 仍只启动 backend + console。规则覆盖 API down、5xx、限流、P0/P1 monitor alert、new-after-triage、stale alert、alert delivery dead-letter、tool failure、LLM fallback 和 circuit breaker。
+Prometheus 示例配置在 `deploy/prometheus/prometheus.yml`，生产告警规则在 `deploy/prometheus/support-agent-alerts.yml`，对应 runbook 在 `docs/alerting-runbook.md`。`docker compose --profile observability up --build` 会把配置和规则只读挂载进 Prometheus，把 UI 绑定到 `127.0.0.1:9090`，并保留 Prometheus lifecycle endpoint 关闭状态；默认 `docker compose up --build` 仍只启动 backend + console。规则覆盖 API down、5xx、限流、P0/P1 monitor alert、new-after-triage、stale alert、alert delivery dead-letter、feedback review stale/unassigned backlog、tool failure、LLM fallback 和 circuit breaker。
 
 `/api/v1/admin/monitor/alert-deliveries/dispatch` 会从持久化 monitor events 派生 P0/P1 active alerts，写入 `alert_delivery_outbox`，再 claim 到期可发送的 delivery。失败会按指数 backoff 设置 `next_attempt_at`；超过 `APP_MONITOR_ALERT_MAX_ATTEMPTS` 后进入 dead-letter，不再自动重试。控制台 Delivery ledger 可以对 `dead` row 做 replay/requeue 或 close，动作会写入 append-only audit event。它不会把用户原文、工具参数或 eval answer 放进通知 payload，只发送 alert key、severity、reason、sample run/event ids 和时间窗口。`GET /api/v1/admin/monitor/alert-deliveries/summary` 给控制台展示 webhook 是 disabled、queued、failed 还是 ok，并返回 in-progress/dead-letter/closed 计数；`/metrics` 会把同一个 durable outbox 聚合成低基数指标，例如 `support_agent_alert_delivery_records{status="dead"}`、`support_agent_alert_delivery_records_by_severity{severity="P0"}` 和 `support_agent_alert_delivery_health_status{status="failed"}`。
 

@@ -32,6 +32,7 @@ from support_agent_lab.tools.registry import ToolAuditSummary, ToolAuditToolSumm
 PROMETHEUS_CONTENT_TYPE = "text/plain; version=0.0.4; charset=utf-8"
 ALERT_DELIVERY_HEALTH_STATUSES = ("ok", "queued", "degraded", "failed", "disabled", "unknown")
 ALERT_DELIVERY_SEVERITIES = ("P0", "P1", "P2", "P3")
+FEEDBACK_REVIEW_STATUSES = ("unreviewed", "acknowledged", "investigating", "resolved", "dismissed")
 
 
 @dataclass(frozen=True)
@@ -145,6 +146,7 @@ def render_prometheus_metrics(
 
     _add_http_metrics(metrics, http_metrics)
     _add_alert_delivery_metrics(metrics, deps, now=now)
+    _add_feedback_review_metrics(metrics, deps, now=now)
     _add_monitor_triage_metrics(metrics, triage_metrics, now=now)
     _add_monitor_metrics(metrics, monitor_summary, monitor_events)
     _add_tool_metrics(metrics, tool_summary)
@@ -302,6 +304,106 @@ def _alert_delivery_health_status(*, webhook_enabled: bool, status_counts: dict[
     if queued_count:
         return "queued"
     return "ok"
+
+
+def _add_feedback_review_metrics(metrics: "_MetricWriter", deps: AppContainer, *, now: datetime) -> None:
+    metrics.add(
+        "support_agent_feedback_review_queue_configured",
+        _bool(bool(deps.event_store)),
+        metric_type="gauge",
+        help_text="Whether feedback review backlog projection can read a durable event store.",
+    )
+    if not deps.event_store:
+        _add_feedback_review_zero_metrics(metrics)
+        return
+
+    queue = deps.event_store.feedback_review_queue(
+        tenant_id=deps.settings.app_tenant_id,
+        limit=1,
+        order="desc",
+    )
+    summary = queue.summary
+    metrics.add(
+        "support_agent_feedback_review_queue_total",
+        summary.total_count,
+        metric_type="gauge",
+        help_text="Filtered response feedback records considered by the feedback review backlog.",
+    )
+    metrics.add(
+        "support_agent_feedback_review_queue_reviewed",
+        summary.reviewed_count,
+        metric_type="gauge",
+        help_text="Response feedback records with at least one review event.",
+    )
+    metrics.add(
+        "support_agent_feedback_review_queue_unreviewed",
+        summary.unreviewed_count,
+        metric_type="gauge",
+        help_text="Response feedback records with no review event.",
+    )
+    metrics.add(
+        "support_agent_feedback_review_queue_unresolved",
+        summary.unresolved_count,
+        metric_type="gauge",
+        help_text="Response feedback records whose current review status still requires action.",
+    )
+    metrics.add(
+        "support_agent_feedback_review_queue_unassigned_unresolved",
+        summary.unassigned_unresolved_count,
+        metric_type="gauge",
+        help_text="Unresolved response feedback records without a current assignee.",
+    )
+    metrics.add(
+        "support_agent_feedback_review_queue_stale_unresolved",
+        summary.stale_unresolved_count,
+        metric_type="gauge",
+        help_text="Unresolved response feedback records older than the feedback review stale threshold.",
+    )
+    metrics.add(
+        "support_agent_feedback_review_queue_summary_truncated",
+        _bool(summary.summary_truncated),
+        metric_type="gauge",
+        help_text="Whether feedback review backlog metrics were derived from a capped source set.",
+    )
+    metrics.add(
+        "support_agent_feedback_review_queue_stale_threshold_seconds",
+        queue.stale_after_hours * 3600,
+        metric_type="gauge",
+        help_text="Age threshold used to classify unresolved response feedback as stale.",
+    )
+    for status in FEEDBACK_REVIEW_STATUSES:
+        metrics.add(
+            "support_agent_feedback_review_queue_by_status",
+            summary.counts_by_status.get(status, 0),
+            {"status": status},
+            metric_type="gauge",
+            help_text="Response feedback review backlog records by bounded current status.",
+        )
+    if summary.oldest_unresolved_feedback_at:
+        metrics.add(
+            "support_agent_feedback_review_queue_oldest_unresolved_age_seconds",
+            _age_seconds(summary.oldest_unresolved_feedback_at, now),
+            metric_type="gauge",
+            help_text="Age of the oldest unresolved response feedback record.",
+        )
+    _add_optional_timestamp(
+        metrics,
+        "support_agent_feedback_review_queue_latest_review_timestamp_seconds",
+        summary.newest_review_at,
+    )
+
+
+def _add_feedback_review_zero_metrics(metrics: "_MetricWriter") -> None:
+    metrics.add("support_agent_feedback_review_queue_total", 0, metric_type="gauge")
+    metrics.add("support_agent_feedback_review_queue_reviewed", 0, metric_type="gauge")
+    metrics.add("support_agent_feedback_review_queue_unreviewed", 0, metric_type="gauge")
+    metrics.add("support_agent_feedback_review_queue_unresolved", 0, metric_type="gauge")
+    metrics.add("support_agent_feedback_review_queue_unassigned_unresolved", 0, metric_type="gauge")
+    metrics.add("support_agent_feedback_review_queue_stale_unresolved", 0, metric_type="gauge")
+    metrics.add("support_agent_feedback_review_queue_summary_truncated", 0, metric_type="gauge")
+    metrics.add("support_agent_feedback_review_queue_stale_threshold_seconds", 48 * 3600, metric_type="gauge")
+    for status in FEEDBACK_REVIEW_STATUSES:
+        metrics.add("support_agent_feedback_review_queue_by_status", 0, {"status": status}, metric_type="gauge")
 
 
 def _add_monitor_triage_metrics(

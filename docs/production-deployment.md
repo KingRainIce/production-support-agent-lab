@@ -528,11 +528,12 @@ endpoint intentionally exports only aggregate, low-cardinality signals such as
 HTTP request counts by method/route family/status, rate-limit decision counts,
 monitor event counts, monitor triage health by status/severity, active/stale
 alert counts, MTTA/MTTR, alert delivery outbox counts by status/severity,
-alert delivery health, grounded/policy/human-review rates, tool audit totals
-and latency summaries, adapter circuit state, LLM fallback counts, and
-rate-limit configuration. It does not include user ids, assignees, trace ids,
-alert keys, triage notes, raw tool arguments, request bodies, retrieved
-snippets, or monitor summaries.
+alert delivery health, feedback review backlog counts by current status,
+stale/unassigned unresolved feedback counts, grounded/policy/human-review
+rates, tool audit totals and latency summaries, adapter circuit state, LLM
+fallback counts, and rate-limit configuration. It does not include user ids,
+assignees, trace ids, alert keys, triage notes, feedback comments, review notes,
+raw tool arguments, request bodies, retrieved snippets, or monitor summaries.
 
 The minimal Prometheus example lives in `deploy/prometheus/prometheus.yml`, the
 production alert rules live in `deploy/prometheus/support-agent-alerts.yml`, and

@@ -112,6 +112,28 @@ groups:
           description: "One or more alert delivery rows are due for dispatch and have not been sent for 15 minutes."
           runbook_url: "https://github.com/kiryce/production-support-agent-lab/blob/master/docs/alerting-runbook.md#supportagentalertdeliverybacklog"
 
+      - alert: SupportAgentFeedbackReviewStale
+        expr: support_agent_feedback_review_queue_stale_unresolved > 0
+        for: 30m
+        labels:
+          severity: warning
+          service: production-support-agent-lab
+        annotations:
+          summary: "Response feedback review backlog has stale unresolved records"
+          description: "At least one unresolved response feedback record is older than the feedback review stale threshold."
+          runbook_url: "https://github.com/kiryce/production-support-agent-lab/blob/master/docs/alerting-runbook.md#supportagentfeedbackreviewstale"
+
+      - alert: SupportAgentFeedbackReviewUnassigned
+        expr: support_agent_feedback_review_queue_unassigned_unresolved > 0
+        for: 30m
+        labels:
+          severity: warning
+          service: production-support-agent-lab
+        annotations:
+          summary: "Response feedback review backlog has unassigned unresolved records"
+          description: "At least one unresolved response feedback record has no current assignee."
+          runbook_url: "https://github.com/kiryce/production-support-agent-lab/blob/master/docs/alerting-runbook.md#supportagentfeedbackreviewunassigned"
+
       - alert: SupportAgentToolFailureRateHigh
         expr: support_agent_tool_failure_rate > 0.1 and support_agent_tool_calls_window >= 20
         for: 10m

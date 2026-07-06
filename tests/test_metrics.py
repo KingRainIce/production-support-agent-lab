@@ -10,7 +10,10 @@ from support_agent_lab.llm.gateway import LLMGateway, LocalDeterministicProvider
 from support_agent_lab.memory.event_store import SQLiteEventStore
 from support_agent_lab.memory.store import ConversationMemory, KnowledgeIndex
 from support_agent_lab.models import (
+    AgentFeedback,
     AlertDeliveryStatus,
+    FeedbackRating,
+    FeedbackReviewEvent,
     IntentType,
     MonitorAlertStatus,
     MonitorAlertTriageEvent,
@@ -187,6 +190,67 @@ def test_prometheus_metrics_exports_alert_delivery_outbox_health(tmp_path):
     assert "support_agent_alert_delivery_due_records 1" in body
     assert "support_agent_alert_delivery_attempts_recorded 2" in body
     assert 'support_agent_alert_delivery_health_status{status="failed"} 1' in body
+
+
+def test_prometheus_metrics_exports_feedback_review_backlog_without_sensitive_payloads(tmp_path):
+    event_store = SQLiteEventStore(tmp_path / "events.db")
+    old_feedback = AgentFeedback(
+        tenant_id="demo_tenant",
+        conversation_id="conv_feedback_metrics",
+        run_id="run_feedback_metrics",
+        user_id="user_feedback_metrics",
+        rating=FeedbackRating.negative,
+        reasons=["wrong_order"],
+        comment="PRIVATE feedback comment should not appear in metrics.",
+        created_at=utc_now() - timedelta(hours=72),
+    )
+    resolved_feedback = AgentFeedback(
+        tenant_id="demo_tenant",
+        conversation_id="conv_feedback_metrics_resolved",
+        run_id="run_feedback_metrics_resolved",
+        user_id="user_feedback_metrics_resolved",
+        rating=FeedbackRating.positive,
+        reasons=["helpful"],
+        comment="PRIVATE resolved feedback comment should not appear in metrics.",
+    )
+    event_store.append_agent_feedback(old_feedback)
+    event_store.append_agent_feedback(resolved_feedback)
+    event_store.append_feedback_review(
+        FeedbackReviewEvent(
+            tenant_id="demo_tenant",
+            feedback_id=resolved_feedback.id,
+            conversation_id=resolved_feedback.conversation_id,
+            run_id=resolved_feedback.run_id,
+            status="resolved",
+            assignee_user_id="feedback-review-owner",
+            actor_user_id="feedback-review-operator",
+            note="PRIVATE feedback review note should not appear in metrics.",
+        )
+    )
+    container = _metrics_container(event_store=event_store)
+
+    body = render_prometheus_metrics(container, source="event_store", window_hours=1)
+
+    assert "PRIVATE feedback comment" not in body
+    assert "PRIVATE resolved feedback comment" not in body
+    assert "PRIVATE feedback review note" not in body
+    assert "feedback-review-owner" not in body
+    assert "feedback-review-operator" not in body
+    assert "user_feedback_metrics" not in body
+    assert "run_feedback_metrics" not in body
+    assert "support_agent_feedback_review_queue_configured 1" in body
+    assert "support_agent_feedback_review_queue_total 2" in body
+    assert "support_agent_feedback_review_queue_reviewed 1" in body
+    assert "support_agent_feedback_review_queue_unreviewed 1" in body
+    assert "support_agent_feedback_review_queue_unresolved 1" in body
+    assert "support_agent_feedback_review_queue_unassigned_unresolved 1" in body
+    assert "support_agent_feedback_review_queue_stale_unresolved 1" in body
+    assert "support_agent_feedback_review_queue_summary_truncated 0" in body
+    assert "support_agent_feedback_review_queue_stale_threshold_seconds 172800" in body
+    assert 'support_agent_feedback_review_queue_by_status{status="resolved"} 1' in body
+    assert 'support_agent_feedback_review_queue_by_status{status="unreviewed"} 1' in body
+    assert "support_agent_feedback_review_queue_oldest_unresolved_age_seconds" in body
+    assert "support_agent_feedback_review_queue_latest_review_timestamp_seconds" in body
 
 
 def test_prometheus_metrics_exports_monitor_triage_health_without_high_cardinality_labels(tmp_path):

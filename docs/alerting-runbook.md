@@ -152,6 +152,30 @@ First response:
 
 Escalate when: the backlog grows or blocks P0/P1 notification.
 
+## SupportAgentFeedbackReviewStale
+
+Meaning: unresolved response feedback is older than the feedback review stale threshold.
+
+First response:
+
+- Open the console `Feedback` workbench and sort/filter the unresolved backlog.
+- Assign an owner, then open the associated run trace before changing status.
+- If the feedback points to a real agent failure, generate a regression draft before marking it resolved.
+
+Escalate when: stale negative feedback affects production users, repeats across reasons, or remains stale after one on-call handoff.
+
+## SupportAgentFeedbackReviewUnassigned
+
+Meaning: at least one unresolved response feedback record has no current owner.
+
+First response:
+
+- Open the console `Feedback` workbench and inspect the `Unassigned` count.
+- Assign an owner through the append-only review trail.
+- Prioritize negative feedback and feedback linked to active monitor alerts.
+
+Escalate when: unassigned feedback keeps growing or the backlog includes security, policy, refund, billing, or account-access complaints.
+
 ## SupportAgentToolFailureRateHigh
 
 Meaning: more than 10% of audited tool calls failed in a meaningful traffic window.
