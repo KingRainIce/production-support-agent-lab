@@ -156,6 +156,13 @@ machine.
   dispatch, replay, and close actions until the snapshot is refreshed. Queue
   cards that appear or change between snapshots receive a compact `new alert`
   or `updated` badge.
+- Guarded triage writes. The console sends an `expectedAlert` snapshot with
+  every acknowledge, assign, investigate, and resolve action. The BFF forwards
+  it as backend `expected_alert`; if the alert status, owner, count, latest
+  monitor event time, latest triage event id, or new-events flag changed since
+  the operator loaded the snapshot, the backend returns `409 Conflict`. The UI
+  refreshes evidence and keeps the operator note so the user can review the new
+  state before retrying.
 - Alert delivery health from `GET /api/v1/admin/monitor/alert-deliveries/summary`.
   The strip shows whether proactive webhook delivery is disabled, queued,
   degraded, failed, or ok, using the durable delivery outbox rather than live

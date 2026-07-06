@@ -38,6 +38,7 @@ import {
   buildAlertDispatchResultStats,
   buildIncidentBrief,
   buildSnapshotFreshness,
+  alertSnapshotFingerprint,
   canCloseAlertDelivery,
   canReplayAlertDelivery,
   diffAlertQueue,
@@ -1491,6 +1492,7 @@ export default function Home() {
     setActionBusy(status);
     setError(null);
     try {
+      const expectedAlert = alertSnapshotFingerprint(activeAlert);
       const response = await fetch("/api/console/triage", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -1498,11 +1500,20 @@ export default function Home() {
           alertKey,
           status,
           assigneeUserId: nextAssigneeUserId ?? (assigneeUserId || null),
-          note: noteOverride ?? (triageNote || `${status} from PSA Lab Console`)
+          note: noteOverride ?? (triageNote || `${status} from PSA Lab Console`),
+          expectedAlert
         })
       });
       const data = await response.json();
       if (!response.ok) {
+        if (response.status === 409) {
+          await loadSnapshot({
+            alertKey,
+            runId: snapshot?.activeRunId ?? selectedRunId,
+            preserveSelection: true,
+            silent: true
+          });
+        }
         throw new Error(data.detail ?? "Triage update failed");
       }
       setTriageNote("");

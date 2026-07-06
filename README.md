@@ -175,6 +175,7 @@ http://127.0.0.1:3000
 
 点击 `Run Scenario` 会通过真实本地 API 创建 session、发送 message、写入 event store、生成 monitor event，再把 trace 拉回控制台。
 控制台会定时刷新 `/api/console/snapshot`；如果页面隐藏会暂停，重新回到页面会立即补一次刷新。顶部的 freshness 状态变成 stale 后，控制台仍允许搜索、筛选、导出，但会阻止 acknowledge、assign、resolve、dispatch、replay、close 等依赖当前监控状态的写操作，直到你手动 `Refresh` 或 live refresh 拉到新快照。
+同时，alert triage 写入会把当前 alert 的 expected state 发给后端；如果另一个值班员已经处理过，或新的 monitor event 已经到达，后端会返回 `409 Conflict`，不会把旧页面上的操作写进 append-only triage log。
 
 ## 第一条 HTTP 闭环
 

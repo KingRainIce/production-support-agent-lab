@@ -348,6 +348,13 @@ stale or a refresh fails, the console keeps read-only search, filtering, and
 export available but blocks alert triage and alert-delivery mutations until a
 fresh snapshot is loaded. This guard is read-only: it does not write triage
 events, dispatch outbox rows, or change promotion-gate evidence by itself.
+Alert triage writes add a second server-side guard: `POST
+/api/v1/admin/monitor/alerts/{alert_key}/triage` may include `expected_alert`
+with the status, assignee, count, `last_seen_at`, `last_triage_event_id`, and
+`new_events_since_triage` values seen by the operator. The API recomputes the
+current alert from persisted monitor and triage events before appending a new
+triage event; if any expected field differs, it returns `409 Conflict` and
+does not write a stale operator action.
 
 `GET /api/v1/admin/monitor/triage/metrics` is the compact production health
 view for on-call handoff. It reads the same persisted `monitor.reviewed` and

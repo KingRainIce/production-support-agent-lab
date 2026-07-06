@@ -1894,18 +1894,22 @@ class SQLiteEventStore:
         alert_key: str | None = None,
         limit: int = 500,
     ) -> list[MonitorAlertTriageEvent]:
-        events = self.list_events(
-            tenant_id=tenant_id,
-            event_type="monitor.alert.triaged",
-            limit=limit,
-        )
-        triage_events = [
-            MonitorAlertTriageEvent.model_validate(event.payload)
-            for event in events
+        sql = "select payload_json from events where event_type = ?"
+        params: list[Any] = ["monitor.alert.triaged"]
+        if tenant_id:
+            sql += " and tenant_id = ?"
+            params.append(tenant_id)
+        if alert_key:
+            sql += " and json_extract(payload_json, '$.alert_key') = ?"
+            params.append(alert_key)
+        sql += " order by created_at asc, rowid asc limit ?"
+        params.append(limit)
+        with self._connect() as conn:
+            rows = conn.execute(sql, params).fetchall()
+        return [
+            MonitorAlertTriageEvent.model_validate(json.loads(row["payload_json"]))
+            for row in rows
         ]
-        if alert_key is None:
-            return triage_events
-        return [event for event in triage_events if event.alert_key == alert_key]
 
     def list_eval_gate_records(
         self,

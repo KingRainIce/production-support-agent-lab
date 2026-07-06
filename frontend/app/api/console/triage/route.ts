@@ -19,7 +19,8 @@ export async function POST(request: NextRequest) {
         body: {
           status: payload.status ?? null,
           assignee_user_id: payload.assigneeUserId ?? null,
-          note: typeof payload.note === "string" ? payload.note : ""
+          note: typeof payload.note === "string" ? payload.note : "",
+          expected_alert: expectedAlertPayload(payload.expectedAlert)
         }
       }
     );
@@ -28,4 +29,29 @@ export async function POST(request: NextRequest) {
     const issue = issueFrom(error);
     return NextResponse.json({ detail: issue.detail }, { status: issue.status });
   }
+}
+
+function expectedAlertPayload(value: unknown) {
+  if (!value || typeof value !== "object") {
+    return null;
+  }
+  const record = value as Record<string, unknown>;
+  if (
+    typeof record.status !== "string" ||
+    typeof record.count !== "number" ||
+    typeof record.lastSeenAt !== "string" ||
+    typeof record.newEventsSinceTriage !== "boolean"
+  ) {
+    return null;
+  }
+  return {
+    status: record.status,
+    assignee_user_id:
+      typeof record.assigneeUserId === "string" ? record.assigneeUserId : null,
+    count: record.count,
+    last_seen_at: record.lastSeenAt,
+    last_triage_event_id:
+      typeof record.lastTriageEventId === "string" ? record.lastTriageEventId : null,
+    new_events_since_triage: record.newEventsSinceTriage
+  };
 }

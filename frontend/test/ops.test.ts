@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  alertSnapshotFingerprint,
   buildAlertDispatchResultStats,
   buildIncidentBrief,
   buildKnowledgeSearchStats,
@@ -325,6 +326,29 @@ describe("ops workbench helpers", () => {
       alertKey: fallbackAlert.key,
       runQuery: "run_2"
     });
+  });
+
+  it("builds compact alert fingerprints for guarded triage writes", () => {
+    expect(
+      alertSnapshotFingerprint(
+        alert({
+          status: "acknowledged",
+          assignee_user_id: "ops",
+          count: 3,
+          last_seen_at: "2026-07-04T00:10:00.000Z",
+          last_triage_event_id: "triage_1",
+          new_events_since_triage: true
+        })
+      )
+    ).toEqual({
+      status: "acknowledged",
+      assigneeUserId: "ops",
+      count: 3,
+      lastSeenAt: "2026-07-04T00:10:00.000Z",
+      lastTriageEventId: "triage_1",
+      newEventsSinceTriage: true
+    });
+    expect(alertSnapshotFingerprint(null)).toBeNull();
   });
 
   it("filters active alerts by severity, owner text, and new-event flag", () => {

@@ -166,6 +166,35 @@ async def test_event_store_persists_monitor_alert_triage_for_summary(tmp_path):
     assert summary.alerts[0].last_triage_note == "Confirmed policy alert and assigned owner."
 
 
+def test_event_store_filters_monitor_alert_triage_before_limit(tmp_path):
+    event_store = SQLiteEventStore(tmp_path / "events.db")
+    for index in range(3):
+        event_store.append_monitor_alert_triage(
+            MonitorAlertTriageEvent(
+                alert_key=f"agent:other:{index}",
+                status=MonitorAlertStatus.acknowledged,
+                actor_user_id="admin_user",
+                note=f"other {index}",
+            ),
+            tenant_id="demo_tenant",
+        )
+    target = MonitorAlertTriageEvent(
+        alert_key="agent:target:TIMEOUT",
+        status=MonitorAlertStatus.investigating,
+        actor_user_id="admin_user",
+        note="target triage",
+    )
+    event_store.append_monitor_alert_triage(target, tenant_id="demo_tenant")
+
+    rows = event_store.list_monitor_alert_triage_events(
+        tenant_id="demo_tenant",
+        alert_key=target.alert_key,
+        limit=1,
+    )
+
+    assert [event.id for event in rows] == [target.id]
+
+
 def test_event_store_lists_monitor_events_by_window_and_newest_order(tmp_path):
     event_store = SQLiteEventStore(tmp_path / "events.db")
     base_time = utc_now() - timedelta(minutes=10)

@@ -134,10 +134,20 @@ class FeedbackReviewRequest(BaseModel):
     note: str = Field(default="", max_length=1000)
 
 
+class ExpectedMonitorAlertState(BaseModel):
+    status: MonitorAlertStatus | None = None
+    assignee_user_id: str | None = Field(default=None, max_length=128)
+    count: int | None = Field(default=None, ge=0)
+    last_seen_at: datetime | None = None
+    last_triage_event_id: str | None = Field(default=None, max_length=128)
+    new_events_since_triage: bool | None = None
+
+
 class TriageMonitorAlertRequest(BaseModel):
     status: MonitorAlertStatus | None = None
     assignee_user_id: str | None = Field(default=None, max_length=128)
     note: str = Field(default="", max_length=1000)
+    expected_alert: ExpectedMonitorAlertState | None = None
 
 
 class AlertDeliveryOperatorActionRequest(BaseModel):
@@ -1645,6 +1655,39 @@ def _list_ops_delivery_records(
 
 def _ops_alert_requires_attention(alert: MonitorAlert) -> bool:
     return _enum_value(alert.status) in OPS_ACTIVE_ALERT_STATUSES or alert.new_events_since_triage
+
+
+def _assert_expected_monitor_alert_state(
+    alert: MonitorAlert,
+    expected: ExpectedMonitorAlertState | None,
+) -> None:
+    if expected is None:
+        return
+    mismatches: list[str] = []
+    fields = expected.model_fields_set
+    if "status" in fields and expected.status != alert.status:
+        mismatches.append("status")
+    if "assignee_user_id" in fields and expected.assignee_user_id != alert.assignee_user_id:
+        mismatches.append("assignee_user_id")
+    if "count" in fields and expected.count != alert.count:
+        mismatches.append("count")
+    if "last_seen_at" in fields and expected.last_seen_at != alert.last_seen_at:
+        mismatches.append("last_seen_at")
+    if "last_triage_event_id" in fields and expected.last_triage_event_id != alert.last_triage_event_id:
+        mismatches.append("last_triage_event_id")
+    if (
+        "new_events_since_triage" in fields
+        and expected.new_events_since_triage != alert.new_events_since_triage
+    ):
+        mismatches.append("new_events_since_triage")
+    if mismatches:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "Monitor alert changed since the console snapshot; "
+                f"refresh before triage ({', '.join(mismatches)})."
+            ),
+        )
 
 
 def _ops_first_sample_run_id(alert: MonitorAlert | None) -> str | None:
@@ -5076,9 +5119,15 @@ def create_app() -> FastAPI:
             tenant_id=deps.settings.app_tenant_id,
             limit=500,
         )
-        summary = summarize_monitor_events(events)
-        if alert_key not in {alert.key for alert in summary.alerts}:
+        triage_events = deps.event_store.list_monitor_alert_triage_events(
+            tenant_id=deps.settings.app_tenant_id,
+            limit=500,
+        )
+        summary = summarize_monitor_events(events, triage_events=triage_events)
+        current_alert = next((alert for alert in summary.alerts if alert.key == alert_key), None)
+        if current_alert is None:
             raise HTTPException(status_code=404, detail="Monitor alert not found")
+        _assert_expected_monitor_alert_state(current_alert, body.expected_alert)
         triage_event = MonitorAlertTriageEvent(
             alert_key=alert_key,
             status=body.status,

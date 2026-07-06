@@ -184,6 +184,15 @@ export type SnapshotSelection = {
   runQuery: string;
 };
 
+export type AlertSnapshotFingerprint = {
+  status: string;
+  assigneeUserId: string | null;
+  count: number;
+  lastSeenAt: string;
+  lastTriageEventId: string | null;
+  newEventsSinceTriage: boolean;
+};
+
 const SEVERITY_RANK: Record<string, number> = {
   P0: 0,
   P1: 1,
@@ -373,6 +382,20 @@ export function reconcileSnapshotSelection(
     runId: preservedRunId,
     alertKey: preservedAlertKey,
     runQuery: current.runQuery || preservedRunId || ""
+  };
+}
+
+export function alertSnapshotFingerprint(alert: MonitorAlert | null): AlertSnapshotFingerprint | null {
+  if (!alert) {
+    return null;
+  }
+  return {
+    status: alert.status,
+    assigneeUserId: alert.assignee_user_id,
+    count: alert.count,
+    lastSeenAt: alert.last_seen_at,
+    lastTriageEventId: alert.last_triage_event_id,
+    newEventsSinceTriage: alert.new_events_since_triage
   };
 }
 

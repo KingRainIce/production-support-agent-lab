@@ -578,6 +578,85 @@ def test_production_monitor_admin_requires_explicit_monitor_scopes(tmp_path, mon
     assert write_allowed.json()["actor_user_id"] == "user_prod"
 
 
+def test_monitor_alert_triage_rejects_stale_expected_state(tmp_path, monkeypatch):
+    monkeypatch.setenv("APP_DATABASE_URL", f"sqlite:///{tmp_path / 'events.db'}")
+    get_settings.cache_clear()
+    app_container = create_container()
+    monitor_event = MonitorEvent(
+        conversation_id="conv_stale_triage",
+        run_id="run_stale_triage",
+        agent_version="agent_test",
+        user_intent=IntentType.order_status,
+        risk_level=RiskLevel.medium,
+        grounded=True,
+        policy_compliant=True,
+        needs_human_review=True,
+        failure_types=["TIMEOUT"],
+        summary="shipping timeout",
+    )
+    app_container.event_store.append_monitor_event(
+        monitor_event,
+        tenant_id=app_container.settings.app_tenant_id,
+    )
+
+    app.dependency_overrides[get_container] = lambda: app_container
+    try:
+        client = TestClient(app)
+        summary = client.get(
+            "/api/v1/admin/monitor/summary",
+            headers={"X-Demo-Role": "admin"},
+            params={"source": "event_store"},
+        )
+        alert = summary.json()["alerts"][0]
+        expected_alert = {
+            "status": alert["status"],
+            "assignee_user_id": alert["assignee_user_id"],
+            "count": alert["count"],
+            "last_seen_at": alert["last_seen_at"],
+            "last_triage_event_id": alert["last_triage_event_id"],
+            "new_events_since_triage": alert["new_events_since_triage"],
+        }
+        first_update = client.post(
+            f"/api/v1/admin/monitor/alerts/{alert['key']}/triage",
+            headers={"X-Demo-Role": "admin"},
+            json={
+                "status": "acknowledged",
+                "note": "first operator ack",
+                "expected_alert": expected_alert,
+            },
+        )
+        stale_update = client.post(
+            f"/api/v1/admin/monitor/alerts/{alert['key']}/triage",
+            headers={"X-Demo-Role": "admin"},
+            json={
+                "status": "resolved",
+                "note": "stale resolve from old console tab",
+                "expected_alert": expected_alert,
+            },
+        )
+        refreshed = client.get(
+            "/api/v1/admin/monitor/summary",
+            headers={"X-Demo-Role": "admin"},
+            params={"source": "event_store"},
+        )
+        triage_events = client.get(
+            f"/api/v1/admin/monitor/alerts/{alert['key']}/triage",
+            headers={"X-Demo-Role": "admin"},
+        )
+    finally:
+        app.dependency_overrides.clear()
+        get_settings.cache_clear()
+
+    assert summary.status_code == 200
+    assert first_update.status_code == 200
+    assert first_update.json()["status"] == "acknowledged"
+    assert stale_update.status_code == 409
+    assert "Monitor alert changed since the console snapshot" in stale_update.json()["detail"]
+    assert "status" in stale_update.json()["detail"]
+    assert refreshed.json()["alerts"][0]["status"] == "acknowledged"
+    assert [event["note"] for event in triage_events.json()] == ["first operator ack"]
+
+
 def test_production_alert_delivery_routes_require_monitor_scopes(tmp_path, monkeypatch):
     monkeypatch.setenv("APP_DATABASE_URL", f"sqlite:///{tmp_path / 'events.db'}")
     get_settings.cache_clear()
