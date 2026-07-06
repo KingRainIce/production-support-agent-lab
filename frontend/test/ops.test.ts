@@ -32,6 +32,7 @@ import type {
   FeedbackReviewQueueItem,
   KnowledgeSearchResponse,
   MonitorAlert,
+  MonitorAlertDeliverySummary,
   MonitorDrilldownResponse,
   MonitorTriageMetricsResponse
 } from "../src/shared/types";
@@ -1078,7 +1079,7 @@ describe("ops workbench helpers", () => {
       badgeLabel: "Unavailable"
     });
     expect(
-      buildMonitorAlertDeliveryStats({
+      buildMonitorAlertDeliveryStats(deliverySummary({
         status: "disabled",
         webhook_enabled: false,
         pending_count: 0,
@@ -1091,14 +1092,14 @@ describe("ops workbench helpers", () => {
         last_attempt_at: null,
         last_success_at: null,
         last_error: null
-      })
+      }))
     ).toMatchObject({
       status: "disabled",
       value: "disabled",
       badgeLabel: "Webhook off"
     });
     expect(
-      buildMonitorAlertDeliveryStats({
+      buildMonitorAlertDeliveryStats(deliverySummary({
         status: "queued",
         webhook_enabled: true,
         pending_count: 2,
@@ -1111,15 +1112,16 @@ describe("ops workbench helpers", () => {
         last_attempt_at: null,
         last_success_at: null,
         last_error: null
-      })
+      }))
     ).toMatchObject({
       status: "queued",
       tone: "warn",
       value: "3 queued",
-      detail: "1 claimed by dispatcher."
+      detail: "1 claimed by dispatcher.",
+      dispatcherLabel: "active"
     });
     expect(
-      buildMonitorAlertDeliveryStats({
+      buildMonitorAlertDeliveryStats(deliverySummary({
         status: "failed",
         webhook_enabled: true,
         pending_count: 1,
@@ -1132,7 +1134,7 @@ describe("ops workbench helpers", () => {
         last_attempt_at: "2026-07-04T00:01:00.000Z",
         last_success_at: null,
         last_error: "HTTP_503"
-      })
+      }))
     ).toMatchObject({
       status: "failed",
       tone: "danger",
@@ -1140,7 +1142,7 @@ describe("ops workbench helpers", () => {
       detail: "HTTP_503"
     });
     expect(
-      buildMonitorAlertDeliveryStats({
+      buildMonitorAlertDeliveryStats(deliverySummary({
         status: "failed",
         webhook_enabled: true,
         pending_count: 0,
@@ -1153,12 +1155,28 @@ describe("ops workbench helpers", () => {
         last_attempt_at: "2026-07-04T00:01:00.000Z",
         last_success_at: null,
         last_error: "HTTP_503"
-      })
+      }))
     ).toMatchObject({
       tone: "danger",
       badgeLabel: "Dead-letter",
       value: "2 dead",
       deadCount: 2
+    });
+    expect(
+      buildMonitorAlertDeliveryStats(deliverySummary({
+        status: "degraded",
+        webhook_enabled: true,
+        dispatcher_status: "stale",
+        dispatcher_active_worker_count: 0,
+        dispatcher_stale_worker_count: 1,
+        dispatcher_last_seen_at: "2026-07-04T00:00:00.000Z"
+      }))
+    ).toMatchObject({
+      status: "degraded",
+      tone: "warn",
+      dispatcherStatus: "stale",
+      dispatcherLabel: "stale",
+      dispatcherLastSeenAt: "2026-07-04T00:00:00.000Z"
     });
   });
 
@@ -1339,6 +1357,31 @@ function deliveryRecord(overrides: Partial<AlertDeliveryRecord>): AlertDeliveryR
     last_error: "HTTP_503",
     created_at: "2026-07-04T00:00:00.000Z",
     updated_at: "2026-07-04T00:03:00.000Z",
+    ...overrides
+  };
+}
+
+function deliverySummary(overrides: Partial<MonitorAlertDeliverySummary>): MonitorAlertDeliverySummary {
+  return {
+    status: "ok",
+    webhook_enabled: true,
+    pending_count: 0,
+    in_progress_count: 0,
+    failed_count: 0,
+    dead_count: 0,
+    closed_count: 0,
+    oldest_pending_at: null,
+    next_attempt_at: null,
+    last_attempt_at: null,
+    last_success_at: null,
+    last_error: null,
+    dispatcher_status: "active",
+    dispatcher_stale_after_seconds: 180,
+    dispatcher_active_worker_count: 1,
+    dispatcher_stale_worker_count: 0,
+    dispatcher_last_seen_at: "2026-07-04T00:02:00.000Z",
+    dispatcher_last_success_at: "2026-07-04T00:02:00.000Z",
+    dispatcher_last_error: null,
     ...overrides
   };
 }

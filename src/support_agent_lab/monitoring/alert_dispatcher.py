@@ -9,12 +9,17 @@ from typing import Literal
 import httpx
 from pydantic import BaseModel, Field
 
-from support_agent_lab.memory.event_store import AlertDeliveryLockLostError, SQLiteEventStore
+from support_agent_lab.memory.event_store import (
+    AlertDeliveryLockLostError,
+    AlertDispatcherHeartbeatSummary,
+    SQLiteEventStore,
+)
 from support_agent_lab.models import AlertDeliveryRecord, AlertDeliveryStatus, new_id, utc_now
 from support_agent_lab.monitoring.monitor import MonitorAlert
 
 
 AlertDeliveryHealthStatus = Literal["ok", "queued", "degraded", "failed", "disabled", "unknown"]
+AlertDispatcherHealthStatus = Literal["active", "stale", "missing", "disabled", "unknown"]
 
 ACTIVE_ALERT_STATUSES = {"open", "acknowledged", "investigating"}
 SEVERITY_RANK = {"P0": 0, "P1": 1, "P2": 2, "P3": 3}
@@ -33,6 +38,13 @@ class AlertDeliverySummary(BaseModel):
     last_attempt_at: datetime | None = None
     last_success_at: datetime | None = None
     last_error: str | None = None
+    dispatcher_status: AlertDispatcherHealthStatus = "unknown"
+    dispatcher_stale_after_seconds: int | None = None
+    dispatcher_active_worker_count: int = 0
+    dispatcher_stale_worker_count: int = 0
+    dispatcher_last_seen_at: datetime | None = None
+    dispatcher_last_success_at: datetime | None = None
+    dispatcher_last_error: str | None = None
 
 
 class AlertDispatchReport(BaseModel):
@@ -147,7 +159,11 @@ def summarize_alert_deliveries(
     *,
     webhook_enabled: bool,
     backlog_threshold: int = 10,
+    dispatcher_heartbeat: AlertDispatcherHeartbeatSummary | None = None,
 ) -> AlertDeliverySummary:
+    dispatcher_status: AlertDispatcherHealthStatus = (
+        "disabled" if not webhook_enabled else _dispatcher_status(dispatcher_heartbeat)
+    )
     if not webhook_enabled:
         return AlertDeliverySummary(
             status="disabled",
@@ -158,6 +174,10 @@ def summarize_alert_deliveries(
             dead_count=0,
             closed_count=0,
             next_attempt_at=None,
+            dispatcher_status=dispatcher_status,
+            dispatcher_stale_after_seconds=(
+                dispatcher_heartbeat.stale_after_seconds if dispatcher_heartbeat else None
+            ),
         )
     pending = [record for record in records if record.status == AlertDeliveryStatus.pending]
     in_progress = [record for record in records if record.status == AlertDeliveryStatus.in_progress]
@@ -171,6 +191,8 @@ def summarize_alert_deliveries(
     status: AlertDeliveryHealthStatus = "ok"
     if failed or dead:
         status = "failed"
+    elif dispatcher_status in {"missing", "stale"}:
+        status = "degraded"
     elif len(pending) + len(in_progress) >= backlog_threshold:
         status = "degraded"
     elif pending or in_progress:
@@ -188,7 +210,28 @@ def summarize_alert_deliveries(
         last_attempt_at=max(last_attempts) if last_attempts else None,
         last_success_at=max(successes) if successes else None,
         last_error=errors[0] if errors else None,
+        dispatcher_status=dispatcher_status,
+        dispatcher_stale_after_seconds=dispatcher_heartbeat.stale_after_seconds if dispatcher_heartbeat else None,
+        dispatcher_active_worker_count=dispatcher_heartbeat.active_worker_count if dispatcher_heartbeat else 0,
+        dispatcher_stale_worker_count=dispatcher_heartbeat.stale_worker_count if dispatcher_heartbeat else 0,
+        dispatcher_last_seen_at=dispatcher_heartbeat.last_seen_at if dispatcher_heartbeat else None,
+        dispatcher_last_success_at=dispatcher_heartbeat.last_success_at if dispatcher_heartbeat else None,
+        dispatcher_last_error=dispatcher_heartbeat.last_error if dispatcher_heartbeat else None,
     )
+
+
+def _dispatcher_status(
+    dispatcher_heartbeat: AlertDispatcherHeartbeatSummary | None,
+) -> AlertDispatcherHealthStatus:
+    if dispatcher_heartbeat is None:
+        return "unknown"
+    if dispatcher_heartbeat.status == "active":
+        return "active"
+    if dispatcher_heartbeat.status == "stale":
+        return "stale"
+    if dispatcher_heartbeat.status == "missing":
+        return "missing"
+    return "unknown"
 
 
 def should_enqueue_alert(alert: MonitorAlert, *, min_severity: str = "P1") -> bool:

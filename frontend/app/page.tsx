@@ -3032,6 +3032,8 @@ function AlertDeliveryStrip({ stats }: { stats: MonitorAlertDeliveryStats }) {
       <div className="triage-health-meta">
         <span>{stats.detail}</span>
         <span>{timingLabel}</span>
+        <span>Dispatcher {stats.dispatcherLabel}</span>
+        <span>Seen {ageLabel(stats.dispatcherLastSeenAt)}</span>
       </div>
     </section>
   );

@@ -122,6 +122,9 @@ export type MonitorAlertDeliveryStats = {
   closedCount: number;
   oldestPendingAt: string | null;
   nextAttemptAt: string | null;
+  dispatcherStatus: MonitorAlertDeliverySummary["dispatcher_status"];
+  dispatcherLabel: string;
+  dispatcherLastSeenAt: string | null;
 };
 
 export type AlertDispatchResultStats = {
@@ -623,13 +626,17 @@ export function buildMonitorAlertDeliveryStats(
       deadCount: 0,
       closedCount: 0,
       oldestPendingAt: null,
-      nextAttemptAt: null
+      nextAttemptAt: null,
+      dispatcherStatus: "unknown",
+      dispatcherLabel: "unknown",
+      dispatcherLastSeenAt: null
     };
   }
   const inProgressCount = summary.in_progress_count ?? 0;
   const deadCount = summary.dead_count ?? 0;
   const closedCount = summary.closed_count ?? 0;
   const nextAttemptAt = summary.next_attempt_at ?? null;
+  const dispatcherLabel = alertDispatcherLabel(summary);
   if (!summary.webhook_enabled || summary.status === "disabled") {
     return {
       status: "disabled",
@@ -643,7 +650,10 @@ export function buildMonitorAlertDeliveryStats(
       deadCount,
       closedCount,
       oldestPendingAt: summary.oldest_pending_at,
-      nextAttemptAt
+      nextAttemptAt,
+      dispatcherStatus: summary.dispatcher_status ?? "unknown",
+      dispatcherLabel,
+      dispatcherLastSeenAt: summary.dispatcher_last_seen_at
     };
   }
   if (summary.status === "failed") {
@@ -659,7 +669,10 @@ export function buildMonitorAlertDeliveryStats(
       deadCount,
       closedCount,
       oldestPendingAt: summary.oldest_pending_at,
-      nextAttemptAt
+      nextAttemptAt,
+      dispatcherStatus: summary.dispatcher_status ?? "unknown",
+      dispatcherLabel,
+      dispatcherLastSeenAt: summary.dispatcher_last_seen_at
     };
   }
   if (summary.status === "degraded") {
@@ -675,7 +688,10 @@ export function buildMonitorAlertDeliveryStats(
       deadCount,
       closedCount,
       oldestPendingAt: summary.oldest_pending_at,
-      nextAttemptAt
+      nextAttemptAt,
+      dispatcherStatus: summary.dispatcher_status ?? "unknown",
+      dispatcherLabel,
+      dispatcherLastSeenAt: summary.dispatcher_last_seen_at
     };
   }
   if (summary.status === "queued") {
@@ -691,7 +707,10 @@ export function buildMonitorAlertDeliveryStats(
       deadCount,
       closedCount,
       oldestPendingAt: summary.oldest_pending_at,
-      nextAttemptAt
+      nextAttemptAt,
+      dispatcherStatus: summary.dispatcher_status ?? "unknown",
+      dispatcherLabel,
+      dispatcherLastSeenAt: summary.dispatcher_last_seen_at
     };
   }
   return {
@@ -706,8 +725,34 @@ export function buildMonitorAlertDeliveryStats(
     deadCount,
     closedCount,
     oldestPendingAt: summary.oldest_pending_at,
-    nextAttemptAt
+    nextAttemptAt,
+    dispatcherStatus: summary.dispatcher_status ?? "unknown",
+    dispatcherLabel,
+    dispatcherLastSeenAt: summary.dispatcher_last_seen_at
   };
+}
+
+function alertDispatcherLabel(summary: MonitorAlertDeliverySummary): string {
+  const dispatcherStatus = summary.dispatcher_status ?? "unknown";
+  const activeCount = summary.dispatcher_active_worker_count ?? 0;
+  const staleCount = summary.dispatcher_stale_worker_count ?? 0;
+  if (dispatcherStatus === "active") {
+    return activeCount > 1
+      ? `${activeCount} active`
+      : "active";
+  }
+  if (dispatcherStatus === "stale") {
+    return staleCount > 1
+      ? `${staleCount} stale`
+      : "stale";
+  }
+  if (dispatcherStatus === "missing") {
+    return "missing";
+  }
+  if (dispatcherStatus === "disabled") {
+    return "disabled";
+  }
+  return "unknown";
 }
 
 export function canReplayAlertDelivery(record: AlertDeliveryRecord) {

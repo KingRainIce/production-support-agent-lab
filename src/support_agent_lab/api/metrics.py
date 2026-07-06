@@ -31,6 +31,7 @@ from support_agent_lab.tools.registry import ToolAuditSummary, ToolAuditToolSumm
 
 PROMETHEUS_CONTENT_TYPE = "text/plain; version=0.0.4; charset=utf-8"
 ALERT_DELIVERY_HEALTH_STATUSES = ("ok", "queued", "degraded", "failed", "disabled", "unknown")
+ALERT_DISPATCHER_HEALTH_STATUSES = ("active", "stale", "missing", "disabled", "unknown")
 ALERT_DELIVERY_SEVERITIES = ("P0", "P1", "P2", "P3")
 FEEDBACK_REVIEW_STATUSES = ("unreviewed", "acknowledged", "investigating", "resolved", "dismissed")
 
@@ -214,9 +215,24 @@ def _add_alert_delivery_metrics(metrics: "_MetricWriter", deps: AppContainer, *,
             metrics,
             "unknown" if webhook_enabled else "disabled",
         )
+        _add_alert_dispatcher_health_metrics(
+            metrics,
+            current_status="unknown" if webhook_enabled else "disabled",
+            active_worker_count=0,
+            stale_worker_count=0,
+            stale_after_seconds=deps.settings.app_monitor_alert_dispatcher_heartbeat_stale_seconds,
+            last_seen_at=None,
+            last_success_at=None,
+            now=now,
+        )
         return
 
     summary = deps.event_store.summarize_alert_delivery_records(tenant_id=deps.settings.app_tenant_id)
+    dispatcher_heartbeat = deps.event_store.summarize_alert_dispatcher_heartbeats(
+        tenant_id=deps.settings.app_tenant_id,
+        stale_after_seconds=deps.settings.app_monitor_alert_dispatcher_heartbeat_stale_seconds,
+        now=now,
+    )
     status_counts = {status.value: 0 for status in AlertDeliveryStatus}
     status_counts.update(summary.counts_by_status)
     for status in [status.value for status in AlertDeliveryStatus]:
@@ -249,7 +265,21 @@ def _add_alert_delivery_metrics(metrics: "_MetricWriter", deps: AppContainer, *,
     )
     _add_alert_delivery_health_metric(
         metrics,
-        _alert_delivery_health_status(webhook_enabled=webhook_enabled, status_counts=status_counts),
+        _alert_delivery_health_status(
+            webhook_enabled=webhook_enabled,
+            status_counts=status_counts,
+            dispatcher_status=dispatcher_heartbeat.status if webhook_enabled else "disabled",
+        ),
+    )
+    _add_alert_dispatcher_health_metrics(
+        metrics,
+        current_status=dispatcher_heartbeat.status if webhook_enabled else "disabled",
+        active_worker_count=dispatcher_heartbeat.active_worker_count,
+        stale_worker_count=dispatcher_heartbeat.stale_worker_count,
+        stale_after_seconds=dispatcher_heartbeat.stale_after_seconds,
+        last_seen_at=dispatcher_heartbeat.last_seen_at,
+        last_success_at=dispatcher_heartbeat.last_success_at,
+        now=now,
     )
     if summary.oldest_actionable_at:
         metrics.add(
@@ -291,11 +321,76 @@ def _add_alert_delivery_health_metric(metrics: "_MetricWriter", current_status: 
         )
 
 
-def _alert_delivery_health_status(*, webhook_enabled: bool, status_counts: dict[str, int]) -> str:
+def _add_alert_dispatcher_health_metrics(
+    metrics: "_MetricWriter",
+    *,
+    current_status: str,
+    active_worker_count: int,
+    stale_worker_count: int,
+    stale_after_seconds: int,
+    last_seen_at: datetime | None,
+    last_success_at: datetime | None,
+    now: datetime,
+) -> None:
+    for status in ALERT_DISPATCHER_HEALTH_STATUSES:
+        metrics.add(
+            "support_agent_alert_dispatcher_health_status",
+            _bool(status == current_status),
+            {"status": status},
+            metric_type="gauge",
+            help_text="Current alert dispatcher heartbeat health as a one-hot gauge.",
+        )
+    metrics.add(
+        "support_agent_alert_dispatcher_workers",
+        active_worker_count,
+        {"status": "active"},
+        metric_type="gauge",
+        help_text="Alert dispatcher worker heartbeat rows by bounded freshness status.",
+    )
+    metrics.add(
+        "support_agent_alert_dispatcher_workers",
+        stale_worker_count,
+        {"status": "stale"},
+        metric_type="gauge",
+    )
+    metrics.add(
+        "support_agent_alert_dispatcher_stale_after_seconds",
+        stale_after_seconds,
+        metric_type="gauge",
+        help_text="Configured heartbeat age after which an alert dispatcher worker is considered stale.",
+    )
+    if last_seen_at:
+        metrics.add(
+            "support_agent_alert_dispatcher_last_heartbeat_timestamp_seconds",
+            _timestamp_seconds(last_seen_at),
+            metric_type="gauge",
+            help_text="Unix timestamp for the most recent alert dispatcher heartbeat.",
+        )
+        metrics.add(
+            "support_agent_alert_dispatcher_heartbeat_age_seconds",
+            _age_seconds(last_seen_at, now),
+            metric_type="gauge",
+            help_text="Age of the most recent alert dispatcher heartbeat.",
+        )
+    _add_optional_timestamp(
+        metrics,
+        "support_agent_alert_dispatcher_last_success_timestamp_seconds",
+        last_success_at,
+    )
+
+
+def _alert_delivery_health_status(
+    *,
+    webhook_enabled: bool,
+    status_counts: dict[str, int],
+    dispatcher_status: str,
+) -> str:
     if not webhook_enabled:
         return "disabled"
     if status_counts.get(AlertDeliveryStatus.failed.value, 0) or status_counts.get(AlertDeliveryStatus.dead.value, 0):
         return "failed"
+    if dispatcher_status in {"missing", "stale"}:
+        return "degraded"
     queued_count = status_counts.get(AlertDeliveryStatus.pending.value, 0) + status_counts.get(
         AlertDeliveryStatus.in_progress.value,
         0,

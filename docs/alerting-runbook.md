@@ -154,6 +154,23 @@ First response:
 
 Escalate when: the backlog grows or blocks P0/P1 notification.
 
+## SupportAgentAlertDispatcherStale
+
+Meaning: proactive alert delivery is enabled, but the durable dispatcher heartbeat is missing or stale.
+
+First response:
+
+- Confirm the `support-agent-alert-dispatcher` process is running, or that the
+  Compose `alerts` profile is enabled.
+- Check `/api/v1/admin/monitor/alert-deliveries/summary` for
+  `dispatcher_status`, `dispatcher_last_seen_at`, and outbox backlog.
+- Use `Dispatch now` as a temporary operator action, then restart or reschedule
+  the worker so P0/P1 notification does not depend on manual clicks.
+- If the worker is running but stale, check its database URL, webhook config,
+  process logs, and whether it can write the shared event-store file.
+
+Escalate when: dispatcher heartbeat is stale while P0/P1 monitor alerts or due delivery rows exist.
+
 ## SupportAgentFeedbackReviewStale
 
 Meaning: unresolved response feedback is older than the feedback review stale threshold.

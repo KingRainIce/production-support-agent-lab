@@ -197,7 +197,9 @@ machine.
   degraded, failed, or ok, using the durable delivery outbox rather than live
   UI state. `claimed` means a dispatcher currently holds a short lease; `dead`
   means the delivery exceeded the configured max attempts and needs operator
-  action.
+  action. The same strip also shows dispatcher heartbeat status and last-seen
+  age, so an operator can distinguish a healthy empty outbox from a missing or
+  stale background worker.
 - Delivery ledger from `GET /api/v1/admin/monitor/alert-deliveries`. The
   `Delivery` workbench tab filters outbox rows by status and lets an operator
   run `Dispatch now`, replay/requeue dead rows, or close `dead` rows through

@@ -62,6 +62,36 @@ class AlertDeliveryMetricSummary(BaseModel):
     last_dead_lettered_at: datetime | None = None
 
 
+class AlertDispatcherHeartbeatRecord(BaseModel):
+    tenant_id: str
+    worker_id: str
+    status: str
+    last_seen_at: datetime
+    last_cycle_started_at: datetime | None = None
+    last_cycle_completed_at: datetime | None = None
+    last_cycle_status: str | None = None
+    last_error: str | None = None
+    cycle_count: int = 0
+    enqueued_count: int = 0
+    claimed_count: int = 0
+    sent_count: int = 0
+    failed_count: int = 0
+    dead_count: int = 0
+    created_at: datetime
+    updated_at: datetime
+
+
+class AlertDispatcherHeartbeatSummary(BaseModel):
+    status: str
+    stale_after_seconds: int
+    total_worker_count: int = 0
+    active_worker_count: int = 0
+    stale_worker_count: int = 0
+    last_seen_at: datetime | None = None
+    last_success_at: datetime | None = None
+    last_error: str | None = None
+
+
 class FeedbackReasonSummary(BaseModel):
     reason: str
     count: int
@@ -206,6 +236,7 @@ SQLITE_REQUIRED_TABLES = (
     "api_request_nonces",
     "api_rate_limits",
     "alert_delivery_outbox",
+    "alert_dispatcher_heartbeats",
     "event_store_operations",
     "event_store_operation_locks",
 )
@@ -235,6 +266,24 @@ SQLITE_EVENT_STORE_OPERATION_LOCKS_REQUIRED_COLUMNS = {
     "operation",
     "acquired_at",
     "expires_at",
+}
+SQLITE_ALERT_DISPATCHER_HEARTBEATS_REQUIRED_COLUMNS = {
+    "tenant_id",
+    "worker_id",
+    "status",
+    "last_seen_at",
+    "last_cycle_started_at",
+    "last_cycle_completed_at",
+    "last_cycle_status",
+    "last_error",
+    "cycle_count",
+    "enqueued_count",
+    "claimed_count",
+    "sent_count",
+    "failed_count",
+    "dead_count",
+    "created_at",
+    "updated_at",
 }
 
 
@@ -984,6 +1033,140 @@ class SQLiteEventStore:
             last_attempt_at=_parse_optional_datetime(row["last_attempt_at"]),
             last_success_at=_parse_optional_datetime(row["last_success_at"]),
             last_dead_lettered_at=_parse_optional_datetime(row["last_dead_lettered_at"]),
+        )
+
+    def record_alert_dispatcher_heartbeat(
+        self,
+        *,
+        tenant_id: str,
+        worker_id: str,
+        status: str,
+        cycle_status: str | None = None,
+        last_error: str | None = None,
+        last_cycle_started_at: datetime | None = None,
+        last_cycle_completed_at: datetime | None = None,
+        enqueued_count: int = 0,
+        claimed_count: int = 0,
+        sent_count: int = 0,
+        failed_count: int = 0,
+        dead_count: int = 0,
+        now: datetime | None = None,
+    ) -> AlertDispatcherHeartbeatRecord:
+        effective_now = now or utc_now()
+        if effective_now.tzinfo is None:
+            effective_now = effective_now.replace(tzinfo=timezone.utc)
+        cycle_increment = 1 if last_cycle_completed_at is not None or cycle_status is not None else 0
+        sanitized_error = last_error[:500] if last_error else None
+        with self._connect() as conn:
+            conn.execute(
+                """
+                insert into alert_dispatcher_heartbeats (
+                  tenant_id, worker_id, status, last_seen_at,
+                  last_cycle_started_at, last_cycle_completed_at, last_cycle_status, last_error,
+                  cycle_count, enqueued_count, claimed_count, sent_count, failed_count, dead_count,
+                  created_at, updated_at
+                ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                on conflict(tenant_id, worker_id) do update set
+                  status = excluded.status,
+                  last_seen_at = excluded.last_seen_at,
+                  last_cycle_started_at = coalesce(excluded.last_cycle_started_at, alert_dispatcher_heartbeats.last_cycle_started_at),
+                  last_cycle_completed_at = coalesce(excluded.last_cycle_completed_at, alert_dispatcher_heartbeats.last_cycle_completed_at),
+                  last_cycle_status = coalesce(excluded.last_cycle_status, alert_dispatcher_heartbeats.last_cycle_status),
+                  last_error = excluded.last_error,
+                  cycle_count = alert_dispatcher_heartbeats.cycle_count + ?,
+                  enqueued_count = excluded.enqueued_count,
+                  claimed_count = excluded.claimed_count,
+                  sent_count = excluded.sent_count,
+                  failed_count = excluded.failed_count,
+                  dead_count = excluded.dead_count,
+                  updated_at = excluded.updated_at
+                """,
+                (
+                    tenant_id,
+                    worker_id,
+                    status,
+                    effective_now.isoformat(),
+                    last_cycle_started_at.isoformat() if last_cycle_started_at else None,
+                    last_cycle_completed_at.isoformat() if last_cycle_completed_at else None,
+                    cycle_status,
+                    sanitized_error,
+                    cycle_increment,
+                    enqueued_count,
+                    claimed_count,
+                    sent_count,
+                    failed_count,
+                    dead_count,
+                    effective_now.isoformat(),
+                    effective_now.isoformat(),
+                    cycle_increment,
+                ),
+            )
+            row = conn.execute(
+                """
+                select *
+                from alert_dispatcher_heartbeats
+                where tenant_id = ? and worker_id = ?
+                """,
+                (tenant_id, worker_id),
+            ).fetchone()
+        return self._alert_dispatcher_heartbeat_from_row(row)
+
+    def list_alert_dispatcher_heartbeats(
+        self,
+        *,
+        tenant_id: str,
+        limit: int = 100,
+        order: str = "desc",
+    ) -> list[AlertDispatcherHeartbeatRecord]:
+        direction = "asc" if order == "asc" else "desc"
+        with self._connect() as conn:
+            rows = conn.execute(
+                f"""
+                select *
+                from alert_dispatcher_heartbeats
+                where tenant_id = ?
+                order by last_seen_at {direction}, rowid {direction}
+                limit ?
+                """,
+                (tenant_id, limit),
+            ).fetchall()
+        return [self._alert_dispatcher_heartbeat_from_row(row) for row in rows]
+
+    def summarize_alert_dispatcher_heartbeats(
+        self,
+        *,
+        tenant_id: str,
+        stale_after_seconds: int,
+        now: datetime | None = None,
+    ) -> AlertDispatcherHeartbeatSummary:
+        effective_now = now or utc_now()
+        if effective_now.tzinfo is None:
+            effective_now = effective_now.replace(tzinfo=timezone.utc)
+        stale_cutoff = effective_now - timedelta(seconds=max(1, stale_after_seconds))
+        records = self.list_alert_dispatcher_heartbeats(tenant_id=tenant_id, limit=1000)
+        active = [record for record in records if record.last_seen_at >= stale_cutoff]
+        stale = [record for record in records if record.last_seen_at < stale_cutoff]
+        if not records:
+            status = "missing"
+        elif active:
+            status = "active"
+        else:
+            status = "stale"
+        success_times = [
+            record.last_cycle_completed_at
+            for record in records
+            if record.last_cycle_status == "success" and record.last_cycle_completed_at is not None
+        ]
+        errors = [record.last_error for record in records if record.last_error]
+        return AlertDispatcherHeartbeatSummary(
+            status=status,
+            stale_after_seconds=stale_after_seconds,
+            total_worker_count=len(records),
+            active_worker_count=len(active),
+            stale_worker_count=len(stale),
+            last_seen_at=max((record.last_seen_at for record in records), default=None),
+            last_success_at=max(success_times) if success_times else None,
+            last_error=errors[0] if errors else None,
         )
 
     def record_alert_delivery_attempt(
@@ -2512,6 +2695,20 @@ class SQLiteEventStore:
             ).fetchone()
             if not alert_delivery_outbox:
                 raise RuntimeError("alert_delivery_outbox table is missing")
+            alert_dispatcher_heartbeats = conn.execute(
+                "select name from sqlite_master where type = 'table' and name = 'alert_dispatcher_heartbeats'"
+            ).fetchone()
+            if not alert_dispatcher_heartbeats:
+                raise RuntimeError("alert_dispatcher_heartbeats table is missing")
+            heartbeat_columns = {
+                item["name"]
+                for item in conn.execute("pragma table_info(alert_dispatcher_heartbeats)").fetchall()
+            }
+            heartbeat_missing = sorted(SQLITE_ALERT_DISPATCHER_HEARTBEATS_REQUIRED_COLUMNS - heartbeat_columns)
+            if heartbeat_missing:
+                raise RuntimeError(
+                    f"alert_dispatcher_heartbeats table missing columns: {', '.join(heartbeat_missing)}"
+                )
             event_store_operations = conn.execute(
                 "select name from sqlite_master where type = 'table' and name = 'event_store_operations'"
             ).fetchone()
@@ -2607,6 +2804,15 @@ class SQLiteEventStore:
             if lock_missing:
                 raise RuntimeError(
                     f"event_store_operation_locks table missing columns: {', '.join(lock_missing)}"
+                )
+            heartbeat_columns = {
+                item["name"]
+                for item in conn.execute("pragma table_info(alert_dispatcher_heartbeats)").fetchall()
+            }
+            heartbeat_missing = sorted(SQLITE_ALERT_DISPATCHER_HEARTBEATS_REQUIRED_COLUMNS - heartbeat_columns)
+            if heartbeat_missing:
+                raise RuntimeError(
+                    f"alert_dispatcher_heartbeats table missing columns: {', '.join(heartbeat_missing)}"
                 )
             table_counts = {
                 table_name: int(conn.execute(f"select count(*) from {table_name}").fetchone()[0])
@@ -2755,6 +2961,34 @@ class SQLiteEventStore:
             operator_action_note=row["operator_action_note"],
             response_status_code=row["response_status_code"],
             last_error=row["last_error"],
+            created_at=datetime.fromisoformat(row["created_at"]),
+            updated_at=datetime.fromisoformat(row["updated_at"]),
+        )
+
+    def _alert_dispatcher_heartbeat_from_row(self, row: sqlite3.Row) -> AlertDispatcherHeartbeatRecord:
+        return AlertDispatcherHeartbeatRecord(
+            tenant_id=row["tenant_id"],
+            worker_id=row["worker_id"],
+            status=row["status"],
+            last_seen_at=datetime.fromisoformat(row["last_seen_at"]),
+            last_cycle_started_at=(
+                datetime.fromisoformat(row["last_cycle_started_at"])
+                if row["last_cycle_started_at"]
+                else None
+            ),
+            last_cycle_completed_at=(
+                datetime.fromisoformat(row["last_cycle_completed_at"])
+                if row["last_cycle_completed_at"]
+                else None
+            ),
+            last_cycle_status=row["last_cycle_status"],
+            last_error=row["last_error"],
+            cycle_count=int(row["cycle_count"]),
+            enqueued_count=int(row["enqueued_count"]),
+            claimed_count=int(row["claimed_count"]),
+            sent_count=int(row["sent_count"]),
+            failed_count=int(row["failed_count"]),
+            dead_count=int(row["dead_count"]),
             created_at=datetime.fromisoformat(row["created_at"]),
             updated_at=datetime.fromisoformat(row["updated_at"]),
         )
@@ -2989,4 +3223,53 @@ class SQLiteEventStore:
             conn.execute("create index if not exists idx_alert_delivery_lock on alert_delivery_outbox(tenant_id, locked_until)")
             conn.execute(
                 "create index if not exists idx_alert_delivery_tenant_status_created on alert_delivery_outbox(tenant_id, status, created_at)"
+            )
+            conn.execute(
+                """
+                create table if not exists alert_dispatcher_heartbeats (
+                  tenant_id text not null,
+                  worker_id text not null,
+                  status text not null,
+                  last_seen_at text not null,
+                  last_cycle_started_at text,
+                  last_cycle_completed_at text,
+                  last_cycle_status text,
+                  last_error text,
+                  cycle_count integer not null default 0,
+                  enqueued_count integer not null default 0,
+                  claimed_count integer not null default 0,
+                  sent_count integer not null default 0,
+                  failed_count integer not null default 0,
+                  dead_count integer not null default 0,
+                  created_at text not null,
+                  updated_at text not null,
+                  primary key (tenant_id, worker_id)
+                )
+                """
+            )
+            heartbeat_columns = {
+                item["name"]
+                for item in conn.execute("pragma table_info(alert_dispatcher_heartbeats)").fetchall()
+            }
+            heartbeat_missing_columns = {
+                "status": "text not null default 'unknown'",
+                "last_seen_at": "text not null default ''",
+                "last_cycle_started_at": "text",
+                "last_cycle_completed_at": "text",
+                "last_cycle_status": "text",
+                "last_error": "text",
+                "cycle_count": "integer not null default 0",
+                "enqueued_count": "integer not null default 0",
+                "claimed_count": "integer not null default 0",
+                "sent_count": "integer not null default 0",
+                "failed_count": "integer not null default 0",
+                "dead_count": "integer not null default 0",
+                "created_at": "text not null default ''",
+                "updated_at": "text not null default ''",
+            }
+            for column_name, column_type in heartbeat_missing_columns.items():
+                if column_name not in heartbeat_columns:
+                    conn.execute(f"alter table alert_dispatcher_heartbeats add column {column_name} {column_type}")
+            conn.execute(
+                "create index if not exists idx_alert_dispatcher_heartbeats_tenant_seen on alert_dispatcher_heartbeats(tenant_id, last_seen_at)"
             )

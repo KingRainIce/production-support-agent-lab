@@ -50,6 +50,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             monitor_limit=args.monitor_limit,
             dispatch_limit=args.dispatch_limit,
             worker_id=worker_id,
+            record_worker_heartbeat=True,
         )
         _emit_report(report, worker_id=worker_id, json_output=args.json)
 

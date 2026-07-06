@@ -173,6 +173,14 @@ def test_prometheus_metrics_exports_alert_delivery_outbox_health(tmp_path):
         max_attempts=1,
         backoff_seconds=60,
     )
+    event_store.record_alert_dispatcher_heartbeat(
+        tenant_id="demo_tenant",
+        worker_id="dispatcher-private-host-123",
+        status="idle",
+        cycle_status="success",
+        last_cycle_completed_at=utc_now(),
+        sent_count=1,
+    )
     settings = Settings(
         app_env="local",
         app_monitor_alert_webhook_enabled=True,
@@ -195,6 +203,11 @@ def test_prometheus_metrics_exports_alert_delivery_outbox_health(tmp_path):
     assert "support_agent_alert_delivery_due_records 1" in body
     assert "support_agent_alert_delivery_attempts_recorded 2" in body
     assert 'support_agent_alert_delivery_health_status{status="failed"} 1' in body
+    assert 'support_agent_alert_dispatcher_health_status{status="active"} 1' in body
+    assert 'support_agent_alert_dispatcher_workers{status="active"} 1' in body
+    assert "support_agent_alert_dispatcher_last_heartbeat_timestamp_seconds" in body
+    assert "support_agent_alert_dispatcher_heartbeat_age_seconds" in body
+    assert "dispatcher-private-host-123" not in body
 
 
 def test_prometheus_metrics_exports_feedback_review_backlog_without_sensitive_payloads(tmp_path):

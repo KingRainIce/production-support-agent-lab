@@ -12,6 +12,7 @@ from support_agent_lab.monitoring.alert_dispatcher import (
     enqueue_alert_deliveries,
 )
 from support_agent_lab.monitoring.monitor import MonitorAlert, summarize_monitor_events
+from support_agent_lab.models import utc_now
 
 
 def monitor_alert_webhook_url(settings: Settings) -> str | None:
@@ -39,6 +40,65 @@ def load_event_store_alerts(
 
 
 def run_alert_delivery_cycle(
+    *,
+    settings: Settings,
+    event_store: SQLiteEventStore,
+    alerts: list[MonitorAlert] | None = None,
+    monitor_limit: int = 500,
+    dispatch_limit: int = 25,
+    worker_id: str | None = None,
+    record_worker_heartbeat: bool = False,
+    transport: httpx.BaseTransport | None = None,
+) -> AlertDispatchReport:
+    cycle_started_at = utc_now()
+    if record_worker_heartbeat and worker_id:
+        event_store.record_alert_dispatcher_heartbeat(
+            tenant_id=settings.app_tenant_id,
+            worker_id=worker_id,
+            status="running",
+            last_cycle_started_at=cycle_started_at,
+        )
+    try:
+        report = _run_alert_delivery_cycle(
+            settings=settings,
+            event_store=event_store,
+            alerts=alerts,
+            monitor_limit=monitor_limit,
+            dispatch_limit=dispatch_limit,
+            worker_id=worker_id,
+            transport=transport,
+        )
+    except Exception as exc:
+        if record_worker_heartbeat and worker_id:
+            event_store.record_alert_dispatcher_heartbeat(
+                tenant_id=settings.app_tenant_id,
+                worker_id=worker_id,
+                status="failed",
+                cycle_status="failed",
+                last_error=exc.__class__.__name__,
+                last_cycle_started_at=cycle_started_at,
+                last_cycle_completed_at=utc_now(),
+            )
+        raise
+    if record_worker_heartbeat and worker_id:
+        event_store.record_alert_dispatcher_heartbeat(
+            tenant_id=settings.app_tenant_id,
+            worker_id=worker_id,
+            status="idle",
+            cycle_status="success",
+            last_error=None,
+            last_cycle_started_at=cycle_started_at,
+            last_cycle_completed_at=utc_now(),
+            enqueued_count=report.enqueued_count,
+            claimed_count=report.claimed_count,
+            sent_count=report.sent_count,
+            failed_count=report.failed_count,
+            dead_count=report.dead_count,
+        )
+    return report
+
+
+def _run_alert_delivery_cycle(
     *,
     settings: Settings,
     event_store: SQLiteEventStore,

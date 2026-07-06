@@ -158,6 +158,81 @@ def test_alert_delivery_metric_summary_counts_expired_in_progress_as_due(tmp_pat
     assert summary.oldest_actionable_at == first.created_at
 
 
+def test_alert_dispatcher_heartbeat_summarizes_active_and_stale_workers(tmp_path):
+    event_store = SQLiteEventStore(tmp_path / "events.db")
+    base_time = utc_now()
+
+    running = event_store.record_alert_dispatcher_heartbeat(
+        tenant_id="demo_tenant",
+        worker_id="dispatcher-private-1",
+        status="running",
+        last_cycle_started_at=base_time,
+        now=base_time,
+    )
+    completed = event_store.record_alert_dispatcher_heartbeat(
+        tenant_id="demo_tenant",
+        worker_id="dispatcher-private-1",
+        status="idle",
+        cycle_status="success",
+        last_cycle_started_at=base_time,
+        last_cycle_completed_at=base_time + timedelta(seconds=2),
+        enqueued_count=1,
+        claimed_count=1,
+        sent_count=1,
+        now=base_time + timedelta(seconds=2),
+    )
+    active = event_store.summarize_alert_dispatcher_heartbeats(
+        tenant_id="demo_tenant",
+        stale_after_seconds=60,
+        now=base_time + timedelta(seconds=30),
+    )
+    stale = event_store.summarize_alert_dispatcher_heartbeats(
+        tenant_id="demo_tenant",
+        stale_after_seconds=60,
+        now=base_time + timedelta(minutes=5),
+    )
+
+    assert running.status == "running"
+    assert completed.cycle_count == 1
+    assert completed.sent_count == 1
+    assert active.status == "active"
+    assert active.active_worker_count == 1
+    assert active.stale_worker_count == 0
+    assert active.last_success_at == base_time + timedelta(seconds=2)
+    assert stale.status == "stale"
+    assert stale.active_worker_count == 0
+    assert stale.stale_worker_count == 1
+
+
+def test_alert_delivery_summary_degrades_when_dispatcher_heartbeat_is_missing_or_stale(tmp_path):
+    event_store = SQLiteEventStore(tmp_path / "events.db")
+    missing = event_store.summarize_alert_dispatcher_heartbeats(
+        tenant_id="demo_tenant",
+        stale_after_seconds=60,
+    )
+    stale_time = utc_now() - timedelta(minutes=5)
+    event_store.record_alert_dispatcher_heartbeat(
+        tenant_id="demo_tenant",
+        worker_id="dispatcher-private-1",
+        status="idle",
+        cycle_status="success",
+        last_cycle_completed_at=stale_time,
+        now=stale_time,
+    )
+    stale = event_store.summarize_alert_dispatcher_heartbeats(
+        tenant_id="demo_tenant",
+        stale_after_seconds=60,
+    )
+
+    missing_summary = summarize_alert_deliveries([], webhook_enabled=True, dispatcher_heartbeat=missing)
+    stale_summary = summarize_alert_deliveries([], webhook_enabled=True, dispatcher_heartbeat=stale)
+
+    assert missing_summary.status == "degraded"
+    assert missing_summary.dispatcher_status == "missing"
+    assert stale_summary.status == "degraded"
+    assert stale_summary.dispatcher_status == "stale"
+
+
 def test_alert_delivery_outbox_migrates_existing_sqlite_tables(tmp_path):
     database_path = tmp_path / "events.db"
     with sqlite3.connect(database_path) as conn:
@@ -193,6 +268,9 @@ def test_alert_delivery_outbox_migrates_existing_sqlite_tables(tmp_path):
     event_store = SQLiteEventStore(database_path)
     with sqlite3.connect(database_path) as conn:
         columns = {row[1] for row in conn.execute("pragma table_info(alert_delivery_outbox)").fetchall()}
+        heartbeat_table = conn.execute(
+            "select name from sqlite_master where type = 'table' and name = 'alert_dispatcher_heartbeats'"
+        ).fetchone()
 
     assert {
         "next_attempt_at",
@@ -204,6 +282,7 @@ def test_alert_delivery_outbox_migrates_existing_sqlite_tables(tmp_path):
         "operator_action_by",
         "operator_action_note",
     } <= columns
+    assert heartbeat_table is not None
     event_store.health_check()
 
 

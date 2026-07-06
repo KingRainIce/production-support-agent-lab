@@ -112,6 +112,17 @@ groups:
           description: "One or more alert delivery rows are due for dispatch and have not been sent for 15 minutes."
           runbook_url: "https://github.com/kiryce/production-support-agent-lab/blob/master/docs/alerting-runbook.md#supportagentalertdeliverybacklog"
 
+      - alert: SupportAgentAlertDispatcherStale
+        expr: support_agent_alert_dispatcher_health_status{status=~"missing|stale"} == 1
+        for: 5m
+        labels:
+          severity: warning
+          service: production-support-agent-lab
+        annotations:
+          summary: "Monitor alert dispatcher heartbeat is stale"
+          description: "Proactive alert delivery is enabled, but no active dispatcher heartbeat has been observed."
+          runbook_url: "https://github.com/kiryce/production-support-agent-lab/blob/master/docs/alerting-runbook.md#supportagentalertdispatcherstale"
+
       - alert: SupportAgentFeedbackReviewStale
         expr: support_agent_feedback_review_queue_stale_unresolved > 0
         for: 30m

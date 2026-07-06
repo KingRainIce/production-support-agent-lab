@@ -464,7 +464,9 @@ text, tool arguments, or eval answer text. Use
 `GET /api/v1/admin/monitor/alert-deliveries/summary` for the console/operator
 health strip and `GET /api/v1/admin/monitor/alert-deliveries` for the delivery
 ledger, including `pending`, `in_progress`, `failed`, `sent`, `dead`, and
-`closed` rows. Operators can use `POST .../{delivery_id}/requeue` to move a
+`closed` rows. The summary also includes dispatcher heartbeat fields such as
+`dispatcher_status`, `dispatcher_last_seen_at`, active/stale worker counts, and
+the configured stale threshold. Operators can use `POST .../{delivery_id}/requeue` to move a
 `dead` row back to `pending` with attempts reset, or `POST .../{delivery_id}/close`
 to mark the dead-letter handled without pretending it was delivered. Both
 actions append audit events with the operator actor id and note.
@@ -475,9 +477,13 @@ Compose `alerts` profile with `docker compose --profile alerts up --build`.
 The worker reads the same SQLite event store and uses the same outbox claim
 leases as the admin endpoint. In production mode it exits non-zero when the
 event store or alert webhook is not configured, so a process manager can detect
-misconfiguration instead of silently running a no-op worker. Its JSON log line is
-a sanitized count summary plus delivery ids; it does not print alert keys,
-sample run ids, webhook payloads, customer text, or triage notes.
+misconfiguration instead of silently running a no-op worker. Each cycle writes a
+durable `alert_dispatcher_heartbeats` row before and after dispatch; the stale
+threshold is `APP_MONITOR_ALERT_DISPATCHER_HEARTBEAT_STALE_SECONDS` and defaults
+to 180 seconds. The API summary and `/metrics` report whether the dispatcher is
+`active`, `stale`, or `missing`, without using `worker_id` as a Prometheus label.
+Its JSON log line is a sanitized count summary plus delivery ids; it does not
+print alert keys, sample run ids, webhook payloads, customer text, or triage notes.
 
 `POST /api/v1/admin/evals/regression-drafts` is production-allowed because it
 is read-only. It loads the persisted run, selected monitor event, and message
@@ -639,7 +645,7 @@ endpoint intentionally exports only aggregate, low-cardinality signals such as
 HTTP request counts by method/route family/status, rate-limit decision counts,
 monitor event counts, monitor triage health by status/severity, active/stale
 alert counts, MTTA/MTTR, alert delivery outbox counts by status/severity,
-alert delivery health, feedback review backlog counts by current status,
+alert delivery health, alert dispatcher heartbeat health, feedback review backlog counts by current status,
 stale/unassigned unresolved feedback counts, grounded/policy/human-review
 rates, tool audit totals and latency summaries, adapter circuit state, LLM
 fallback counts, effective rate-limit backend, and rate-limit configuration. It does not include user ids,

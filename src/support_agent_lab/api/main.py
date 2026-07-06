@@ -1050,7 +1050,11 @@ def _slo_alert_delivery(
     status: Literal["met", "at_risk", "breached", "no_data"] = "met"
     if observed_dead_count > max_dead_count or summary.status == "failed":
         status = "breached"
+    elif summary.dispatcher_status in {"missing", "stale"} and active_p0p1_alerts:
+        status = "breached"
     elif summary.status in {"queued", "degraded"} or (summary.status == "disabled" and active_p0p1_alerts):
+        status = "at_risk"
+    elif summary.dispatcher_status in {"missing", "stale"}:
         status = "at_risk"
     elif summary.status == "disabled":
         status = "no_data"
@@ -1063,7 +1067,7 @@ def _slo_alert_delivery(
         error_budget_remaining=1.0 if status == "met" else 0.25 if status == "at_risk" else 0.0,
         detail=(
             f"Alert delivery is {summary.status}; {observed_dead_count} dead-letter row(s), "
-            f"{summary.pending_count} pending row(s)."
+            f"{summary.pending_count} pending row(s), dispatcher is {summary.dispatcher_status}."
         ),
         evidence=observed,
     )
@@ -1822,6 +1826,13 @@ def _ops_delivery_summary_evidence(summary: AlertDeliverySummary) -> dict[str, A
         "last_attempt_at": summary.last_attempt_at,
         "last_success_at": summary.last_success_at,
         "last_error": summary.last_error,
+        "dispatcher_status": summary.dispatcher_status,
+        "dispatcher_active_worker_count": summary.dispatcher_active_worker_count,
+        "dispatcher_stale_worker_count": summary.dispatcher_stale_worker_count,
+        "dispatcher_stale_after_seconds": summary.dispatcher_stale_after_seconds,
+        "dispatcher_last_seen_at": summary.dispatcher_last_seen_at,
+        "dispatcher_last_success_at": summary.dispatcher_last_success_at,
+        "dispatcher_last_error": summary.dispatcher_last_error,
     }
 
 
@@ -3294,9 +3305,14 @@ def _monitor_alert_delivery_summary(deps: AppContainer, limit: int) -> AlertDeli
         limit=limit,
         order="desc",
     )
+    dispatcher_heartbeat = deps.event_store.summarize_alert_dispatcher_heartbeats(
+        tenant_id=deps.settings.app_tenant_id,
+        stale_after_seconds=deps.settings.app_monitor_alert_dispatcher_heartbeat_stale_seconds,
+    )
     return summarize_alert_deliveries(
         records,
         webhook_enabled=bool(_monitor_alert_webhook_url(deps)),
+        dispatcher_heartbeat=dispatcher_heartbeat,
     )
 
 

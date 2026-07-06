@@ -1,6 +1,7 @@
 import json
 
 import httpx
+import pytest
 
 from support_agent_lab.config import Settings
 from support_agent_lab.memory.event_store import SQLiteEventStore
@@ -32,9 +33,15 @@ def test_alert_delivery_cycle_projects_event_store_alerts_and_sends_once(tmp_pat
         monitor_limit=25,
         dispatch_limit=10,
         worker_id="worker-a",
+        record_worker_heartbeat=True,
         transport=httpx.MockTransport(handler),
     )
     records = event_store.list_alert_delivery_records(tenant_id="demo_tenant")
+    heartbeats = event_store.list_alert_dispatcher_heartbeats(tenant_id="demo_tenant")
+    heartbeat_summary = event_store.summarize_alert_dispatcher_heartbeats(
+        tenant_id="demo_tenant",
+        stale_after_seconds=180,
+    )
 
     assert report.webhook_enabled is True
     assert report.enqueued_count == 1
@@ -46,6 +53,12 @@ def test_alert_delivery_cycle_projects_event_store_alerts_and_sends_once(tmp_pat
     assert records[0].status == "sent"
     assert records[0].locked_by is None
     assert records[0].response_status_code == 202
+    assert len(heartbeats) == 1
+    assert heartbeats[0].worker_id == "worker-a"
+    assert heartbeats[0].last_cycle_status == "success"
+    assert heartbeats[0].cycle_count == 1
+    assert heartbeats[0].sent_count == 1
+    assert heartbeat_summary.status == "active"
 
 
 def test_alert_delivery_cycle_deduplicates_sent_alerts_across_workers(tmp_path):
@@ -73,6 +86,31 @@ def test_alert_delivery_cycle_deduplicates_sent_alerts_across_workers(tmp_path):
     assert second.claimed_count == 0
     assert second.attempted_count == 0
     assert len(calls) == 1
+
+
+def test_alert_delivery_cycle_records_failed_heartbeat(tmp_path, monkeypatch):
+    event_store = SQLiteEventStore(tmp_path / "events.db")
+
+    def fail_monitor_read(*args, **kwargs):
+        raise RuntimeError("monitor read failed")
+
+    monkeypatch.setattr(event_store, "list_monitor_events", fail_monitor_read)
+
+    with pytest.raises(RuntimeError):
+        run_alert_delivery_cycle(
+            settings=_webhook_settings(),
+            event_store=event_store,
+            worker_id="worker-failed",
+            record_worker_heartbeat=True,
+        )
+
+    heartbeats = event_store.list_alert_dispatcher_heartbeats(tenant_id="demo_tenant")
+    assert len(heartbeats) == 1
+    assert heartbeats[0].worker_id == "worker-failed"
+    assert heartbeats[0].status == "failed"
+    assert heartbeats[0].last_cycle_status == "failed"
+    assert heartbeats[0].last_error == "RuntimeError"
+    assert heartbeats[0].cycle_count == 1
 
 
 def test_alert_dispatcher_worker_fails_fast_in_production_without_webhook(tmp_path, monkeypatch, capsys):

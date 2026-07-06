@@ -662,6 +662,13 @@ export type MonitorAlertDeliverySummary = {
   last_attempt_at: string | null;
   last_success_at: string | null;
   last_error: string | null;
+  dispatcher_status: "active" | "stale" | "missing" | "disabled" | "unknown";
+  dispatcher_stale_after_seconds: number | null;
+  dispatcher_active_worker_count: number;
+  dispatcher_stale_worker_count: number;
+  dispatcher_last_seen_at: string | null;
+  dispatcher_last_success_at: string | null;
+  dispatcher_last_error: string | null;
 };
 
 export type AlertDeliveryStatus =
