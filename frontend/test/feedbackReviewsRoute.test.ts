@@ -66,7 +66,14 @@ describe("feedback review BFF route", () => {
         feedbackId: " fdbk_1 ",
         status: "resolved",
         assigneeUserId: " ops ",
-        note: " done "
+        note: " done ",
+        expectedReview: {
+          currentStatus: "acknowledged",
+          reviewCount: 1,
+          latestReviewId: "fdbrv_1",
+          latestReviewAt: "2026-07-06T00:00:00.000Z",
+          assigneeUserId: "ops"
+        }
       })
     );
 
@@ -77,7 +84,47 @@ describe("feedback review BFF route", () => {
     expect(JSON.parse(String(init?.body))).toEqual({
       status: "resolved",
       assignee_user_id: "ops",
-      note: "done"
+      note: "done",
+      expected_review: {
+        current_status: "acknowledged",
+        review_count: 1,
+        latest_review_id: "fdbrv_1",
+        latest_review_at: "2026-07-06T00:00:00.000Z",
+        assignee_user_id: "ops"
+      }
+    });
+  });
+
+  it("passes stale feedback review conflicts back to the console", async () => {
+    process.env.AGENT_API_BASE_URL = "http://agent.internal";
+    process.env.FRONTEND_AUTH_MODE = "demo";
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      jsonResponse(
+        {
+          detail:
+            "Feedback review changed since the console snapshot; refresh before review (current_status)."
+        },
+        409
+      )
+    );
+
+    const response = await POST(
+      jsonRequest("/api/console/feedback/reviews", {
+        feedbackId: "fdbk_1",
+        status: "resolved",
+        expectedReview: {
+          currentStatus: "unreviewed",
+          reviewCount: 0,
+          latestReviewId: null,
+          latestReviewAt: null,
+          assigneeUserId: null
+        }
+      })
+    );
+
+    expect(response.status).toBe(409);
+    expect(await response.json()).toEqual({
+      detail: "Feedback review changed since the console snapshot; refresh before review (current_status)."
     });
   });
 
@@ -112,9 +159,9 @@ function jsonRequest(path: string, body: unknown) {
   }) as unknown as NextRequest;
 }
 
-function jsonResponse(body: unknown) {
+function jsonResponse(body: unknown, status = 200) {
   return new Response(JSON.stringify(body), {
-    status: 200,
+    status,
     headers: { "Content-Type": "application/json" }
   });
 }

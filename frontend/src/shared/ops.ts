@@ -4,6 +4,9 @@ import type {
   ConsoleSnapshot,
   EvalGateRecord,
   EvalReport,
+  FeedbackReviewEvent,
+  FeedbackReviewQueueItem,
+  FeedbackReviewStatus,
   IncidentBriefResponse,
   KnowledgeSearchResponse,
   MonitorAlert,
@@ -191,6 +194,14 @@ export type AlertSnapshotFingerprint = {
   lastSeenAt: string;
   lastTriageEventId: string | null;
   newEventsSinceTriage: boolean;
+};
+
+export type FeedbackReviewSnapshotFingerprint = {
+  currentStatus: FeedbackReviewStatus | "unreviewed";
+  reviewCount: number;
+  latestReviewId: string | null;
+  latestReviewAt: string | null;
+  assigneeUserId: string | null;
 };
 
 const SEVERITY_RANK: Record<string, number> = {
@@ -396,6 +407,32 @@ export function alertSnapshotFingerprint(alert: MonitorAlert | null): AlertSnaps
     lastSeenAt: alert.last_seen_at,
     lastTriageEventId: alert.last_triage_event_id,
     newEventsSinceTriage: alert.new_events_since_triage
+  };
+}
+
+export function feedbackReviewSnapshotFingerprint(
+  feedbackId: string,
+  reviews: FeedbackReviewEvent[],
+  queueState: FeedbackReviewQueueItem | null
+): FeedbackReviewSnapshotFingerprint {
+  const visibleReviews = reviews.filter((review) => review.feedback_id === feedbackId);
+  const useQueueState = Boolean(queueState && queueState.review_count >= visibleReviews.length);
+  if (queueState && useQueueState) {
+    return {
+      currentStatus: queueState.current_status,
+      reviewCount: queueState.review_count,
+      latestReviewId: queueState.latest_review_id,
+      latestReviewAt: queueState.latest_review_at,
+      assigneeUserId: queueState.assignee_user_id
+    };
+  }
+  const latestReview = visibleReviews.at(-1) ?? null;
+  return {
+    currentStatus: latestReview?.status ?? "unreviewed",
+    reviewCount: visibleReviews.length,
+    latestReviewId: latestReview?.id ?? null,
+    latestReviewAt: latestReview?.created_at ?? null,
+    assigneeUserId: latestReview?.assignee_user_id ?? null
   };
 }
 

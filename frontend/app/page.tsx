@@ -39,6 +39,7 @@ import {
   buildIncidentBrief,
   buildSnapshotFreshness,
   alertSnapshotFingerprint,
+  feedbackReviewSnapshotFingerprint,
   canCloseAlertDelivery,
   canReplayAlertDelivery,
   diffAlertQueue,
@@ -82,6 +83,7 @@ import type {
   AgentRunTrace,
   AgentFeedback,
   FeedbackReviewEvent,
+  FeedbackReviewQueueItem,
   FeedbackReviewQueueStatus,
   FeedbackReviewStatus,
   AlertDispatchReport,
@@ -1374,6 +1376,24 @@ export default function Home() {
     void loadSnapshot({ runId: event.run_id, alertKey });
   }
 
+  async function refreshFeedbackReviewTrail(feedbackId: string) {
+    const params = new URLSearchParams({
+      feedbackId,
+      limit: "50",
+      order: "asc"
+    });
+    const response = await fetch(`/api/console/feedback/reviews?${params.toString()}`, {
+      cache: "no-store"
+    });
+    const data = await response.json();
+    if (!response.ok) {
+      throw new Error(data.detail ?? "Feedback review trail failed");
+    }
+    const reviews = data as FeedbackReviewEvent[];
+    setFeedbackReviews(reviews);
+    setFeedbackReviewAssignee(reviews.at(-1)?.assignee_user_id ?? "");
+  }
+
   async function createRegressionDraft(event: MonitorEvent) {
     setRegressionDraftLoadingId(event.id);
     setRegressionDraftError(null);
@@ -1433,12 +1453,20 @@ export default function Home() {
     }
   }
 
-  async function submitFeedbackReview(feedback: AgentFeedback) {
+  async function submitFeedbackReview(
+    feedback: AgentFeedback,
+    reviewState: FeedbackReviewQueueItem | null = null
+  ) {
     const requestId = feedbackReviewRequestId.current + 1;
     feedbackReviewRequestId.current = requestId;
     setFeedbackReviewLoadingId(feedback.id);
     setFeedbackReviewError(null);
     try {
+      const expectedReview = feedbackReviewSnapshotFingerprint(
+        feedback.id,
+        feedbackReviews,
+        reviewState
+      );
       const response = await fetch("/api/console/feedback/reviews", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -1447,11 +1475,18 @@ export default function Home() {
           feedbackId: feedback.id,
           status: feedbackReviewStatus,
           assigneeUserId: feedbackReviewAssignee,
-          note: feedbackReviewNote
+          note: feedbackReviewNote,
+          expectedReview
         })
       });
       const data = await response.json();
       if (!response.ok) {
+        if (response.status === 409) {
+          await Promise.allSettled([
+            refreshFeedbackReviewTrail(feedback.id),
+            searchFeedback()
+          ]);
+        }
         throw new Error(data.detail ?? "Feedback review update failed");
       }
       if (feedbackReviewRequestId.current !== requestId) {
@@ -4070,7 +4105,10 @@ function FeedbackWorkbenchPanel({
   onSubmit: (event: FormEvent<HTMLFormElement>) => void;
   onSearch: (overrides?: FeedbackSearchOverrides) => void | Promise<void>;
   onOpenFeedback: (feedback: AgentFeedback) => void;
-  onSubmitReview: (feedback: AgentFeedback) => void | Promise<void>;
+  onSubmitReview: (
+    feedback: AgentFeedback,
+    reviewState: FeedbackReviewQueueItem | null
+  ) => void | Promise<void>;
   onDraftFeedback: (feedback: AgentFeedback) => void | Promise<void>;
   onCopyRegressionDraft: () => void | Promise<void>;
 }) {
@@ -4264,7 +4302,7 @@ function FeedbackWorkbenchPanel({
                     onStatus={onReviewStatus}
                     onAssignee={onReviewAssignee}
                     onNote={onReviewNote}
-                    onSubmit={() => void onSubmitReview(feedback)}
+                    onSubmit={() => void onSubmitReview(feedback, reviewState)}
                   />
                 </>
               ) : null}

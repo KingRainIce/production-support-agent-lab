@@ -2092,6 +2092,82 @@ def test_admin_can_review_feedback_append_only(tmp_path, monkeypatch):
     assert "operator_one" not in serialized_timeline
 
 
+def test_feedback_review_rejects_stale_expected_state(tmp_path, monkeypatch):
+    monkeypatch.setenv("APP_DATABASE_URL", f"sqlite:///{tmp_path / 'events.db'}")
+    get_settings.cache_clear()
+    app_container = create_container()
+    app.dependency_overrides[get_container] = lambda: app_container
+    try:
+        client = TestClient(app)
+        session = client.post("/api/v1/chat/sessions", json={"user_id": "user_demo"}).json()
+        message = client.post(
+            "/api/v1/chat/messages",
+            json={
+                "conversation_id": session["conversation_id"],
+                "user_id": "user_demo",
+                "content": "The last answer missed my refund policy.",
+            },
+        ).json()
+        feedback = client.post(
+            f"/api/v1/agent/runs/{message['trace_id']}/feedback",
+            json={
+                "rating": "negative",
+                "reasons": ["not_helpful"],
+                "comment": "needs review",
+            },
+        ).json()
+        expected_review = {
+            "current_status": "unreviewed",
+            "review_count": 0,
+            "latest_review_id": None,
+            "latest_review_at": None,
+            "assignee_user_id": None,
+        }
+
+        first_review = client.post(
+            f"/api/v1/admin/feedback/{feedback['id']}/reviews",
+            headers={"X-Demo-Role": "admin", "X-Demo-User": "operator_one"},
+            json={
+                "status": "acknowledged",
+                "assignee_user_id": "ops",
+                "note": "first operator ack",
+                "expected_review": expected_review,
+            },
+        )
+        stale_review = client.post(
+            f"/api/v1/admin/feedback/{feedback['id']}/reviews",
+            headers={"X-Demo-Role": "admin", "X-Demo-User": "operator_two"},
+            json={
+                "status": "resolved",
+                "assignee_user_id": "ops",
+                "note": "stale resolve from old console tab",
+                "expected_review": expected_review,
+            },
+        )
+        trail = client.get(
+            f"/api/v1/admin/feedback/{feedback['id']}/reviews",
+            headers={"X-Demo-Role": "admin"},
+            params={"order": "asc"},
+        )
+        queue = client.get(
+            "/api/v1/admin/feedback/review-queue",
+            headers={"X-Demo-Role": "admin"},
+            params={"run_id": message["trace_id"]},
+        )
+    finally:
+        app.dependency_overrides.clear()
+        get_settings.cache_clear()
+
+    assert first_review.status_code == 200
+    assert first_review.json()["status"] == "acknowledged"
+    assert stale_review.status_code == 409
+    assert "Feedback review changed since the console snapshot" in stale_review.json()["detail"]
+    assert "current_status" in stale_review.json()["detail"]
+    assert [event["note"] for event in trail.json()] == ["first operator ack"]
+    assert queue.json()["items"][0]["current_status"] == "acknowledged"
+    assert queue.json()["items"][0]["review_count"] == 1
+
+
 def test_production_feedback_write_requires_feedback_scope(tmp_path, monkeypatch):
     monkeypatch.setenv("APP_DATABASE_URL", f"sqlite:///{tmp_path / 'events.db'}")
     get_settings.cache_clear()

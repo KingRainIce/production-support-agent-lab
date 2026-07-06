@@ -571,6 +571,18 @@ def test_event_store_persists_feedback_review_trail_append_only(tmp_path):
     assert queue_by_id[unresolved.id].is_unassigned is True
     assert queue_without_tenant_by_id[feedback.id].current_status == "resolved"
     assert queue_without_tenant_by_id[feedback.id].review_count == 2
+    assert event_store.count_feedback_review_events(
+        feedback_id=feedback.id,
+        tenant_id="tenant_a",
+    ) == 2
+    assert event_store.count_feedback_review_events(
+        feedback_id=feedback.id,
+        tenant_id="tenant_b",
+    ) == 1
+    assert event_store.count_feedback_review_events(
+        feedback_id=unresolved.id,
+        tenant_id="tenant_a",
+    ) == 0
 
 
 @pytest.mark.asyncio

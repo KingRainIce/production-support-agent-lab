@@ -18,6 +18,7 @@ import {
   diffAlertQueue,
   filterAndSortAlerts,
   formatEvalStatus,
+  feedbackReviewSnapshotFingerprint,
   incidentBriefFromResponse,
   latestEvalGateRecord,
   reconcileSnapshotSelection
@@ -27,6 +28,8 @@ import type {
   AlertDeliveryRecord,
   ConsoleSnapshot,
   EvalGateRecord,
+  FeedbackReviewEvent,
+  FeedbackReviewQueueItem,
   KnowledgeSearchResponse,
   MonitorAlert,
   MonitorDrilldownResponse,
@@ -49,6 +52,47 @@ function alert(overrides: Partial<MonitorAlert>): MonitorAlert {
     last_triage_at: null,
     last_triage_note: null,
     new_events_since_triage: false,
+    ...overrides
+  };
+}
+
+function feedbackReview(overrides: Partial<FeedbackReviewEvent>): FeedbackReviewEvent {
+  return {
+    id: "fdbrv_1",
+    tenant_id: "demo_tenant",
+    feedback_id: "fdbk_1",
+    conversation_id: "conv_1",
+    run_id: "run_1",
+    status: "acknowledged",
+    assignee_user_id: null,
+    actor_user_id: "operator",
+    note: "reviewing",
+    created_at: "2026-07-04T00:00:00.000Z",
+    ...overrides
+  };
+}
+
+function feedbackQueueItem(
+  overrides: Partial<FeedbackReviewQueueItem>
+): FeedbackReviewQueueItem {
+  return {
+    feedback_id: "fdbk_1",
+    run_id: "run_1",
+    conversation_id: "conv_1",
+    user_id: "user_1",
+    rating: "negative",
+    reasons: ["not_helpful"],
+    source: "user",
+    feedback_created_at: "2026-07-04T00:00:00.000Z",
+    current_status: "unreviewed",
+    review_count: 0,
+    latest_review_id: null,
+    latest_review_at: null,
+    assignee_user_id: null,
+    is_unresolved: true,
+    is_unassigned: true,
+    is_stale: false,
+    age_hours: 1,
     ...overrides
   };
 }
@@ -349,6 +393,58 @@ describe("ops workbench helpers", () => {
       newEventsSinceTriage: true
     });
     expect(alertSnapshotFingerprint(null)).toBeNull();
+  });
+
+  it("builds guarded feedback review fingerprints from queue state or trail state", () => {
+    expect(feedbackReviewSnapshotFingerprint("fdbk_1", [], null)).toEqual({
+      currentStatus: "unreviewed",
+      reviewCount: 0,
+      latestReviewId: null,
+      latestReviewAt: null,
+      assigneeUserId: null
+    });
+
+    expect(
+      feedbackReviewSnapshotFingerprint(
+        "fdbk_1",
+        [feedbackReview({ id: "fdbrv_old", status: "acknowledged" })],
+        feedbackQueueItem({
+          current_status: "resolved",
+          review_count: 2,
+          latest_review_id: "fdbrv_latest",
+          latest_review_at: "2026-07-04T00:10:00.000Z",
+          assignee_user_id: "ops"
+        })
+      )
+    ).toEqual({
+      currentStatus: "resolved",
+      reviewCount: 2,
+      latestReviewId: "fdbrv_latest",
+      latestReviewAt: "2026-07-04T00:10:00.000Z",
+      assigneeUserId: "ops"
+    });
+
+    expect(
+      feedbackReviewSnapshotFingerprint(
+        "fdbk_1",
+        [
+          feedbackReview({ id: "fdbrv_1", status: "acknowledged" }),
+          feedbackReview({
+            id: "fdbrv_2",
+            status: "investigating",
+            assignee_user_id: "qa",
+            created_at: "2026-07-04T00:12:00.000Z"
+          })
+        ],
+        feedbackQueueItem({ review_count: 1, latest_review_id: "fdbrv_1" })
+      )
+    ).toEqual({
+      currentStatus: "investigating",
+      reviewCount: 2,
+      latestReviewId: "fdbrv_2",
+      latestReviewAt: "2026-07-04T00:12:00.000Z",
+      assigneeUserId: "qa"
+    });
   });
 
   it("filters active alerts by severity, owner text, and new-event flag", () => {

@@ -92,7 +92,9 @@ real local FastAPI endpoints:
    shows unresolved, unassigned, stale, and reviewed backlog metrics.
 19. `GET /api/v1/admin/feedback/{feedback_id}/reviews` and
    `POST /api/v1/admin/feedback/{feedback_id}/reviews` when the `Feedback`
-   workbench loads or records the append-only operator review trail.
+   workbench loads or records the append-only operator review trail. Review
+   writes send the current review-state fingerprint so stale tabs cannot
+   append obsolete feedback decisions.
 20. `GET /api/v1/admin/promotion/decisions` and
    `POST /api/v1/admin/promotion/decisions` when `Settings` shows or records
    append-only release decisions tied to a fresh promotion-gate snapshot.
@@ -163,6 +165,12 @@ machine.
   the operator loaded the snapshot, the backend returns `409 Conflict`. The UI
   refreshes evidence and keeps the operator note so the user can review the new
   state before retrying.
+- Guarded feedback review writes. The console sends an `expectedReview`
+  fingerprint with each feedback review action, derived from the compact review
+  queue projection or the loaded review trail. The BFF forwards it as backend
+  `expected_review`; if another operator already appended a review event, the
+  backend returns `409 Conflict`, refreshes the trail/backlog evidence, and
+  keeps the operator note for a deliberate retry.
 - Alert delivery health from `GET /api/v1/admin/monitor/alert-deliveries/summary`.
   The strip shows whether proactive webhook delivery is disabled, queued,
   degraded, failed, or ok, using the durable delivery outbox rather than live

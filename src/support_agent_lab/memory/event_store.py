@@ -281,7 +281,10 @@ class SQLiteEventStore:
         limit: int = 100,
         order: str = "asc",
     ) -> list[FeedbackReviewEvent]:
-        sql = "select payload_json from events where event_type = ? and json_extract(payload_json, '$.feedback_id') = ?"
+        sql = (
+            "select payload_json from events where event_type = ? "
+            "and json_extract(payload_json, '$.feedback_id') = ?"
+        )
         params: list[Any] = [FEEDBACK_REVIEW_EVENT_TYPE, feedback_id]
         if tenant_id:
             sql += " and tenant_id = ?"
@@ -291,6 +294,24 @@ class SQLiteEventStore:
         with self._connect() as conn:
             rows = conn.execute(sql, [*params, limit]).fetchall()
         return [FeedbackReviewEvent.model_validate(json.loads(row["payload_json"])) for row in rows]
+
+    def count_feedback_review_events(
+        self,
+        *,
+        feedback_id: str,
+        tenant_id: str | None = None,
+    ) -> int:
+        sql = (
+            "select count(*) as total_count from events where event_type = ? "
+            "and json_extract(payload_json, '$.feedback_id') = ?"
+        )
+        params: list[Any] = [FEEDBACK_REVIEW_EVENT_TYPE, feedback_id]
+        if tenant_id:
+            sql += " and tenant_id = ?"
+            params.append(tenant_id)
+        with self._connect() as conn:
+            row = conn.execute(sql, params).fetchone()
+        return int(row["total_count"] or 0)
 
     def list_agent_feedback(
         self,

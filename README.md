@@ -492,6 +492,7 @@ Eval 不只看最终回答，还检查：
 `/api/v1/admin/promotion/gate` 是只读发布前检查：它不会自动跑 eval 或改 triage，而是读取 readiness、monitor triage metrics、tool audit summary、response feedback summary 和最新 staging aggregate eval gate，返回 `passed`、`warn` 或 `blocked` 以及每条 evidence。负反馈率超过阈值会阻断发布；反馈样本量不足会给出 warning。控制台会把这个状态放进 Overview 和 Production Preflight。
 
 `/api/v1/admin/feedback/review-queue` 是只读反馈复核队列：它从 append-only feedback/review 事件投影当前状态、未解决数、未分配数、过期未处理数、最新 assignee 和复核次数。它不输出用户 comment、operator note 或 raw payload，适合控制台首页、值班队列、自动化计划和报表使用；只有打开单条反馈时才读取 review trail。
+反馈复核写入也会发送 expected review state；如果另一位操作者已经追加了 review event，后端会返回 `409 Conflict`，不会把旧页面上的复核结论写进 append-only review trail。
 
 `/api/v1/admin/operations/slo-report` 是只读服务目标报告：它复用同一套生产证据，返回 `slo_report.v1`，逐项说明 grounded rate、policy compliance、human review rate、active P0/P1、tool failure rate、feedback negative rate、staging eval freshness、triage MTTA 和 alert delivery health 是否 `met`、`at_risk`、`breached` 或 `no_data`，并给出 `error_budget_remaining`。它只输出聚合证据，不输出用户原文、工具参数、检索正文、memory facts 或反馈 comment。控制台 Overview 会显示 SLO 总状态，Settings 会列出每个 objective。
 

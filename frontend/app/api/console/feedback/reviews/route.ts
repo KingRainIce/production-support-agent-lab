@@ -51,7 +51,8 @@ export async function POST(request: NextRequest) {
         body: {
           status,
           assignee_user_id: cleanText(readString(body, "assigneeUserId"), 128) || null,
-          note: cleanText(readString(body, "note"), 1000)
+          note: cleanText(readString(body, "note"), 1000),
+          expected_review: expectedReviewPayload(readValue(body, "expectedReview"))
         }
       }
     );
@@ -63,11 +64,38 @@ export async function POST(request: NextRequest) {
 }
 
 function readString(source: unknown, key: string): string {
+  const value = readValue(source, key);
+  return typeof value === "string" ? value : "";
+}
+
+function readValue(source: unknown, key: string): unknown {
   if (!source || typeof source !== "object" || !(key in source)) {
     return "";
   }
-  const value = (source as Record<string, unknown>)[key];
-  return typeof value === "string" ? value : "";
+  return (source as Record<string, unknown>)[key];
+}
+
+function expectedReviewPayload(value: unknown) {
+  if (!value || typeof value !== "object") {
+    return null;
+  }
+  const record = value as Record<string, unknown>;
+  if (
+    typeof record.currentStatus !== "string" ||
+    typeof record.reviewCount !== "number"
+  ) {
+    return null;
+  }
+  return {
+    current_status: record.currentStatus,
+    review_count: record.reviewCount,
+    latest_review_id:
+      typeof record.latestReviewId === "string" ? record.latestReviewId : null,
+    latest_review_at:
+      typeof record.latestReviewAt === "string" ? record.latestReviewAt : null,
+    assignee_user_id:
+      typeof record.assigneeUserId === "string" ? record.assigneeUserId : null
+  };
 }
 
 function cleanText(value: string | null, maxLength: number): string {

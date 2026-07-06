@@ -128,10 +128,19 @@ class AgentFeedbackRequest(BaseModel):
     source: Literal["user", "operator", "qa"] = "user"
 
 
+class ExpectedFeedbackReviewState(BaseModel):
+    current_status: FeedbackReviewStatus | Literal["unreviewed"] | None = None
+    review_count: int | None = Field(default=None, ge=0)
+    latest_review_id: str | None = Field(default=None, max_length=128)
+    latest_review_at: datetime | None = None
+    assignee_user_id: str | None = Field(default=None, max_length=128)
+
+
 class FeedbackReviewRequest(BaseModel):
     status: FeedbackReviewStatus
     assignee_user_id: str | None = Field(default=None, max_length=128)
     note: str = Field(default="", max_length=1000)
+    expected_review: ExpectedFeedbackReviewState | None = None
 
 
 class ExpectedMonitorAlertState(BaseModel):
@@ -1686,6 +1695,59 @@ def _assert_expected_monitor_alert_state(
             detail=(
                 "Monitor alert changed since the console snapshot; "
                 f"refresh before triage ({', '.join(mismatches)})."
+            ),
+        )
+
+
+def _current_feedback_review_state(
+    event_store: Any,
+    *,
+    feedback_id: str,
+    tenant_id: str,
+) -> ExpectedFeedbackReviewState:
+    latest_reviews = event_store.list_feedback_review_events(
+        feedback_id=feedback_id,
+        tenant_id=tenant_id,
+        limit=1,
+        order="desc",
+    )
+    latest = latest_reviews[0] if latest_reviews else None
+    return ExpectedFeedbackReviewState(
+        current_status=latest.status if latest else "unreviewed",
+        review_count=event_store.count_feedback_review_events(
+            feedback_id=feedback_id,
+            tenant_id=tenant_id,
+        ),
+        latest_review_id=latest.id if latest else None,
+        latest_review_at=latest.created_at if latest else None,
+        assignee_user_id=latest.assignee_user_id if latest else None,
+    )
+
+
+def _assert_expected_feedback_review_state(
+    current: ExpectedFeedbackReviewState,
+    expected: ExpectedFeedbackReviewState | None,
+) -> None:
+    if expected is None:
+        return
+    mismatches: list[str] = []
+    fields = expected.model_fields_set
+    if "current_status" in fields and expected.current_status != current.current_status:
+        mismatches.append("current_status")
+    if "review_count" in fields and expected.review_count != current.review_count:
+        mismatches.append("review_count")
+    if "latest_review_id" in fields and expected.latest_review_id != current.latest_review_id:
+        mismatches.append("latest_review_id")
+    if "latest_review_at" in fields and expected.latest_review_at != current.latest_review_at:
+        mismatches.append("latest_review_at")
+    if "assignee_user_id" in fields and expected.assignee_user_id != current.assignee_user_id:
+        mismatches.append("assignee_user_id")
+    if mismatches:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "Feedback review changed since the console snapshot; "
+                f"refresh before review ({', '.join(mismatches)})."
             ),
         )
 
@@ -4560,6 +4622,12 @@ def create_app() -> FastAPI:
         )
         if feedback is None:
             raise HTTPException(status_code=404, detail="Feedback not found")
+        current_review = _current_feedback_review_state(
+            deps.event_store,
+            feedback_id=feedback.id,
+            tenant_id=deps.settings.app_tenant_id,
+        )
+        _assert_expected_feedback_review_state(current_review, body.expected_review)
         review = FeedbackReviewEvent(
             tenant_id=feedback.tenant_id,
             feedback_id=feedback.id,
