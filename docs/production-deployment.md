@@ -486,6 +486,9 @@ Accepted deliveries are recorded idempotently in `alert_webhook_receipts`; the
 ledger stores delivery id, alert key, severity, hashes, counts, duplicate count,
 and timestamps, not raw webhook body, headers, reason text, or sample ids. Use
 `GET /api/v1/admin/monitor/alert-webhook-receipts` to inspect receipt summaries.
+The console `Receipts` tab reads the same endpoint through its signed BFF and
+returns only delivery id, alert key, severity, body hash, counts, and timestamps
+to the browser.
 
 For unattended production delivery, run the same cycle with
 `support-agent-alert-dispatcher --interval-seconds 30 --json` or start the

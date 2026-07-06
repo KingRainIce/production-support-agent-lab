@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   alertSnapshotFingerprint,
   buildAlertDispatchResultStats,
+  buildAlertWebhookReceiptStats,
   buildIncidentBrief,
   buildKnowledgeSearchStats,
   buildMonitorAlertDeliveryStats,
@@ -14,6 +15,7 @@ import {
   buildToolAuditStats,
   canCloseAlertDelivery,
   canReplayAlertDelivery,
+  alertWebhookReceiptTone,
   deliveryStatusTone,
   diffAlertQueue,
   filterAndSortAlerts,
@@ -26,6 +28,7 @@ import {
 import type {
   AlertDispatchReport,
   AlertDeliveryRecord,
+  AlertWebhookReceiptRecord,
   ConsoleSnapshot,
   EvalGateRecord,
   FeedbackReviewEvent,
@@ -1193,6 +1196,43 @@ describe("ops workbench helpers", () => {
     expect(deliveryStatusTone(closed.status)).toBe("neutral");
   });
 
+  it("summarizes alert webhook receipts without raw payload data", () => {
+    expect(buildAlertWebhookReceiptStats([])).toEqual({
+      receiptCount: 0,
+      duplicateCount: 0,
+      sampleEventCount: 0,
+      sampleRunCount: 0,
+      latestReceivedAt: null,
+      newestDeliveryId: "none"
+    });
+
+    const first = receiptRecord({
+      delivery_id: "deliv_older",
+      duplicate_count: 0,
+      sample_event_count: 2,
+      sample_run_count: 1,
+      last_received_at: "2026-07-04T00:01:00.000Z"
+    });
+    const latest = receiptRecord({
+      delivery_id: "deliv_latest",
+      duplicate_count: 2,
+      sample_event_count: 1,
+      sample_run_count: 1,
+      last_received_at: "2026-07-04T00:05:00.000Z"
+    });
+
+    expect(alertWebhookReceiptTone(first)).toBe("success");
+    expect(alertWebhookReceiptTone(latest)).toBe("warn");
+    expect(buildAlertWebhookReceiptStats([first, latest])).toEqual({
+      receiptCount: 2,
+      duplicateCount: 2,
+      sampleEventCount: 3,
+      sampleRunCount: 2,
+      latestReceivedAt: "2026-07-04T00:05:00.000Z",
+      newestDeliveryId: "deliv_latest"
+    });
+  });
+
   it("summarizes alert delivery dispatch reports", () => {
     expect(buildAlertDispatchResultStats(null)).toBeNull();
     expect(
@@ -1357,6 +1397,24 @@ function deliveryRecord(overrides: Partial<AlertDeliveryRecord>): AlertDeliveryR
     last_error: "HTTP_503",
     created_at: "2026-07-04T00:00:00.000Z",
     updated_at: "2026-07-04T00:03:00.000Z",
+    ...overrides
+  };
+}
+
+function receiptRecord(overrides: Partial<AlertWebhookReceiptRecord> = {}): AlertWebhookReceiptRecord {
+  return {
+    delivery_id: "deliv_1",
+    alert_key: "agent:order:TIMEOUT",
+    severity: "P1",
+    body_hash: "body_hash_1",
+    alert_count: 1,
+    sample_event_count: 1,
+    sample_run_count: 1,
+    duplicate_count: 0,
+    first_received_at: "2026-07-04T00:00:00.000Z",
+    last_received_at: "2026-07-04T00:00:00.000Z",
+    created_at: "2026-07-04T00:00:00.000Z",
+    updated_at: "2026-07-04T00:00:00.000Z",
     ...overrides
   };
 }

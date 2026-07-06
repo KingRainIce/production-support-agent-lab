@@ -42,6 +42,7 @@ The console should help an on-call operator or Agent beginner answer:
 | Monitor events | `GET /api/v1/admin/monitor/events?source=event_store` | Raw structured monitor events for sampling and replay. |
 | Monitor drilldown | `GET /api/v1/admin/monitor/drilldown?source=event_store&alert_key=...` | Event-level alert investigation with failure, intent, and risk buckets. |
 | Alert delivery ledger | `GET /api/v1/admin/monitor/alert-deliveries`; `GET /api/v1/admin/monitor/alert-deliveries/summary`; `POST .../{delivery_id}/requeue`; `POST .../{delivery_id}/close` | Durable webhook outbox handling plus dispatcher heartbeat status for operator replay/close and stale-worker diagnosis. |
+| Alert receipt ledger | `GET /api/v1/admin/monitor/alert-webhook-receipts` | Read-only receiving-side proof that signed webhook deliveries reached the receiver, with only hashes, counts, and timestamps. |
 | Alert triage | `GET/POST /api/v1/admin/monitor/alerts/{alert_key}/triage` | Append-only ack/investigate/resolve workflow. |
 | SLO report | `GET /api/v1/admin/operations/slo-report` | Service-objective status, observed aggregates, and error-budget remaining for on-call review. |
 | Operations automation | `GET /api/v1/admin/operations/automation-plan` | Prioritized next-action plan with runnable commands, scopes, guardrails, and auto-execution safety labels. |
@@ -84,6 +85,9 @@ Checks performed:
   new rail item.
 - Alerts workbench includes a `Delivery` tab for durable outbox rows, with
   replay/close actions only on dead-letter rows.
+- Alerts workbench includes a `Receipts` tab for signed inbound webhook receipt
+  summaries, searchable by alert key or delivery id without exposing raw body or
+  header data.
 - Desktop and mobile Monitor Drilldown states render real event-store results:
   active alert key, backend stats, failure buckets, monitor event cards, and
   no page-level horizontal overflow.

@@ -36,9 +36,11 @@ import {
 } from "lucide-react";
 import {
   buildAlertDispatchResultStats,
+  buildAlertWebhookReceiptStats,
   buildIncidentBrief,
   buildSnapshotFreshness,
   alertSnapshotFingerprint,
+  alertWebhookReceiptTone,
   feedbackReviewSnapshotFingerprint,
   canCloseAlertDelivery,
   canReplayAlertDelivery,
@@ -59,6 +61,7 @@ import {
   type AlertSort,
   type AlertStatusFilter,
   type AlertQueueDiff,
+  type AlertWebhookReceiptStats,
   type IncidentBrief,
   type KnowledgeSearchStats,
   type MonitorAlertDeliveryStats,
@@ -89,6 +92,7 @@ import type {
   AlertDispatchReport,
   AlertDeliveryRecord,
   AlertDeliveryStatus,
+  AlertWebhookReceiptRecord,
   ConsoleSnapshot,
   EvalGateRecord,
   EvalReport,
@@ -191,7 +195,7 @@ type FeedbackSearchOverrides = Partial<{
   order: "asc" | "desc";
 }>;
 
-type AlertWorkbenchView = "queue" | "drilldown" | "delivery";
+type AlertWorkbenchView = "queue" | "drilldown" | "delivery" | "receipts";
 type AlertDeliveryStatusFilter = AlertDeliveryStatus | "all";
 
 type MonitorDrilldownFilters = {
@@ -331,6 +335,12 @@ export default function Home() {
   const [alertDeliveryActionBusy, setAlertDeliveryActionBusy] = useState<string | null>(null);
   const [alertDeliveryDispatchReport, setAlertDeliveryDispatchReport] =
     useState<AlertDispatchReport | null>(null);
+  const [alertReceiptAlertKey, setAlertReceiptAlertKey] = useState("");
+  const [alertReceiptDeliveryId, setAlertReceiptDeliveryId] = useState("");
+  const [alertReceiptOrder, setAlertReceiptOrder] = useState<"asc" | "desc">("desc");
+  const [alertWebhookReceipts, setAlertWebhookReceipts] = useState<AlertWebhookReceiptRecord[]>([]);
+  const [alertWebhookReceiptsLoading, setAlertWebhookReceiptsLoading] = useState(false);
+  const [alertWebhookReceiptsError, setAlertWebhookReceiptsError] = useState<string | null>(null);
   const [monitorFilters, setMonitorFilters] = useState<MonitorDrilldownFilters>(
     DEFAULT_MONITOR_DRILLDOWN_FILTERS
   );
@@ -589,6 +599,10 @@ export default function Home() {
   const alertDeliveryStats = useMemo<MonitorAlertDeliveryStats>(
     () => buildMonitorAlertDeliveryStats(snapshot?.monitorAlertDelivery ?? null),
     [snapshot?.monitorAlertDelivery]
+  );
+  const alertWebhookReceiptStats = useMemo<AlertWebhookReceiptStats>(
+    () => buildAlertWebhookReceiptStats(alertWebhookReceipts),
+    [alertWebhookReceipts]
   );
   const snapshotFreshness = useMemo(
     () =>
@@ -1032,6 +1046,16 @@ export default function Home() {
     if (view === "delivery" && !alertDeliveriesLoading && alertDeliveries.length === 0) {
       void loadAlertDeliveries(deliveryStatusFilter);
     }
+    if (view === "receipts" && !alertWebhookReceiptsLoading && alertWebhookReceipts.length === 0) {
+      const hasExplicitFilter = Boolean(alertReceiptAlertKey.trim() || alertReceiptDeliveryId.trim());
+      const defaultAlertKey = selectedAlertKey ?? activeAlert?.key ?? "";
+      if (!hasExplicitFilter && defaultAlertKey) {
+        setAlertReceiptAlertKey(defaultAlertKey);
+        void loadAlertWebhookReceipts({ alertKey: defaultAlertKey });
+      } else {
+        void loadAlertWebhookReceipts();
+      }
+    }
   }
 
   async function loadAlertDeliveries(nextStatus = deliveryStatusFilter) {
@@ -1063,6 +1087,58 @@ export default function Home() {
   function changeDeliveryStatusFilter(nextStatus: AlertDeliveryStatusFilter) {
     setDeliveryStatusFilter(nextStatus);
     void loadAlertDeliveries(nextStatus);
+  }
+
+  async function loadAlertWebhookReceipts(
+    overrides: Partial<{ alertKey: string; deliveryId: string; order: "asc" | "desc" }> = {}
+  ) {
+    setAlertWebhookReceiptsLoading(true);
+    setAlertWebhookReceiptsError(null);
+    try {
+      const explicitAlertKey = (overrides.alertKey ?? alertReceiptAlertKey).trim();
+      const deliveryId = (overrides.deliveryId ?? alertReceiptDeliveryId).trim();
+      const params = new URLSearchParams({
+        limit: "50",
+        order: overrides.order ?? alertReceiptOrder
+      });
+      if (explicitAlertKey) {
+        params.set("alertKey", explicitAlertKey);
+      }
+      if (deliveryId) {
+        params.set("deliveryId", deliveryId);
+      }
+      const response = await fetch(`/api/console/monitor/alert-webhook-receipts?${params.toString()}`, {
+        cache: "no-store"
+      });
+      const data = await response.json();
+      if (!response.ok) {
+        throw new Error(data.detail ?? "Alert webhook receipt ledger failed");
+      }
+      setAlertWebhookReceipts(data as AlertWebhookReceiptRecord[]);
+    } catch (nextError) {
+      setAlertWebhookReceiptsError(
+        nextError instanceof Error ? nextError.message : "Alert webhook receipt ledger failed"
+      );
+    } finally {
+      setAlertWebhookReceiptsLoading(false);
+    }
+  }
+
+  function submitAlertWebhookReceiptSearch(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    void loadAlertWebhookReceipts();
+  }
+
+  function changeAlertReceiptOrder(nextOrder: "asc" | "desc") {
+    setAlertReceiptOrder(nextOrder);
+    void loadAlertWebhookReceipts({ order: nextOrder });
+  }
+
+  function useActiveAlertReceiptFilter() {
+    const nextAlertKey = selectedAlertKey ?? activeAlert?.key ?? "";
+    setAlertReceiptAlertKey(nextAlertKey);
+    setAlertReceiptDeliveryId("");
+    void loadAlertWebhookReceipts({ alertKey: nextAlertKey, deliveryId: "" });
   }
 
   async function submitAlertDeliveryAction(record: AlertDeliveryRecord, action: "replay" | "close") {
@@ -2411,6 +2487,19 @@ export default function Home() {
               onRefreshDeliveries={() => void loadAlertDeliveries(deliveryStatusFilter)}
               onDispatchDeliveries={() => void submitAlertDeliveryDispatch()}
               onDeliveryAction={(record, action) => void submitAlertDeliveryAction(record, action)}
+              receiptRows={alertWebhookReceipts}
+              receiptStats={alertWebhookReceiptStats}
+              receiptAlertKey={alertReceiptAlertKey}
+              receiptDeliveryId={alertReceiptDeliveryId}
+              receiptOrder={alertReceiptOrder}
+              receiptLoading={alertWebhookReceiptsLoading}
+              receiptError={alertWebhookReceiptsError}
+              onReceiptAlertKey={setAlertReceiptAlertKey}
+              onReceiptDeliveryId={setAlertReceiptDeliveryId}
+              onReceiptOrder={changeAlertReceiptOrder}
+              onSubmitReceipts={submitAlertWebhookReceiptSearch}
+              onRefreshReceipts={() => void loadAlertWebhookReceipts()}
+              onUseActiveAlertReceipts={useActiveAlertReceiptFilter}
             />
           )}
           <section className="run-panel">
@@ -2711,7 +2800,20 @@ function MonitorWorkbenchPanel({
   onDeliveryStatus,
   onRefreshDeliveries,
   onDispatchDeliveries,
-  onDeliveryAction
+  onDeliveryAction,
+  receiptRows,
+  receiptStats,
+  receiptAlertKey,
+  receiptDeliveryId,
+  receiptOrder,
+  receiptLoading,
+  receiptError,
+  onReceiptAlertKey,
+  onReceiptDeliveryId,
+  onReceiptOrder,
+  onSubmitReceipts,
+  onRefreshReceipts,
+  onUseActiveAlertReceipts
 }: {
   view: AlertWorkbenchView;
   onView: (view: AlertWorkbenchView) => void;
@@ -2768,17 +2870,34 @@ function MonitorWorkbenchPanel({
   onRefreshDeliveries: () => void;
   onDispatchDeliveries: () => void;
   onDeliveryAction: (record: AlertDeliveryRecord, action: "replay" | "close") => void;
+  receiptRows: AlertWebhookReceiptRecord[];
+  receiptStats: AlertWebhookReceiptStats;
+  receiptAlertKey: string;
+  receiptDeliveryId: string;
+  receiptOrder: "asc" | "desc";
+  receiptLoading: boolean;
+  receiptError: string | null;
+  onReceiptAlertKey: (value: string) => void;
+  onReceiptDeliveryId: (value: string) => void;
+  onReceiptOrder: (value: "asc" | "desc") => void;
+  onSubmitReceipts: (event: FormEvent<HTMLFormElement>) => void;
+  onRefreshReceipts: () => void;
+  onUseActiveAlertReceipts: () => void;
 }) {
+  const headingValue =
+    view === "queue"
+      ? `${filteredAlerts.length} of ${snapshot?.summary.alerts.length ?? 0} alerts`
+      : view === "delivery"
+        ? `${deliveryRows.length} delivery rows`
+        : view === "receipts"
+          ? `${receiptStats.receiptCount} receipts`
+          : `${drilldownStats.matchingEvents} matching events`;
   return (
     <aside className="alerts-panel monitor-workbench">
       <div className="panel-heading">
         <div>
           <span>Monitor Workbench</span>
-          <strong>
-            {view === "queue"
-              ? `${filteredAlerts.length} of ${snapshot?.summary.alerts.length ?? 0} alerts`
-              : `${drilldownStats.matchingEvents} matching events`}
-          </strong>
+          <strong>{headingValue}</strong>
         </div>
       </div>
 
@@ -2812,6 +2931,15 @@ function MonitorWorkbenchPanel({
           onClick={() => onView("delivery")}
         >
           Delivery
+        </button>
+        <button
+          type="button"
+          role="tab"
+          aria-selected={view === "receipts"}
+          className={view === "receipts" ? "is-active" : ""}
+          onClick={() => onView("receipts")}
+        >
+          Receipts
         </button>
       </div>
 
@@ -2953,7 +3081,7 @@ function MonitorWorkbenchPanel({
           onDraftRegression={onDraftRegression}
           onCopyRegressionDraft={onCopyRegressionDraft}
         />
-      ) : (
+      ) : view === "delivery" ? (
         <AlertDeliveryLedger
           rows={deliveryRows}
           status={deliveryStatus}
@@ -2966,6 +3094,23 @@ function MonitorWorkbenchPanel({
           onRefresh={onRefreshDeliveries}
           onDispatch={onDispatchDeliveries}
           onAction={onDeliveryAction}
+        />
+      ) : (
+        <AlertWebhookReceiptLedger
+          rows={receiptRows}
+          stats={receiptStats}
+          alertKey={receiptAlertKey}
+          deliveryId={receiptDeliveryId}
+          order={receiptOrder}
+          activeAlertKey={activeAlert?.key ?? snapshot?.activeAlertKey ?? null}
+          loading={receiptLoading}
+          error={receiptError}
+          onAlertKey={onReceiptAlertKey}
+          onDeliveryId={onReceiptDeliveryId}
+          onOrder={onReceiptOrder}
+          onSubmit={onSubmitReceipts}
+          onRefresh={onRefreshReceipts}
+          onUseActiveAlert={onUseActiveAlertReceipts}
         />
       )}
     </aside>
@@ -3189,6 +3334,147 @@ function AlertDeliveryLedger({
                     Close
                   </button>
                 </div>
+              </div>
+            </article>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+function AlertWebhookReceiptLedger({
+  rows,
+  stats,
+  alertKey,
+  deliveryId,
+  order,
+  activeAlertKey,
+  loading,
+  error,
+  onAlertKey,
+  onDeliveryId,
+  onOrder,
+  onSubmit,
+  onRefresh,
+  onUseActiveAlert
+}: {
+  rows: AlertWebhookReceiptRecord[];
+  stats: AlertWebhookReceiptStats;
+  alertKey: string;
+  deliveryId: string;
+  order: "asc" | "desc";
+  activeAlertKey: string | null;
+  loading: boolean;
+  error: string | null;
+  onAlertKey: (value: string) => void;
+  onDeliveryId: (value: string) => void;
+  onOrder: (value: "asc" | "desc") => void;
+  onSubmit: (event: FormEvent<HTMLFormElement>) => void;
+  onRefresh: () => void;
+  onUseActiveAlert: () => void;
+}) {
+  return (
+    <div className="delivery-ledger receipt-ledger">
+      <form className="queue-controls delivery-controls" aria-label="Alert webhook receipt controls" onSubmit={onSubmit}>
+        <label className="search-control receipt-search-control">
+          <Search size={14} />
+          <input
+            value={alertKey}
+            onChange={(event) => onAlertKey(event.target.value)}
+            placeholder={activeAlertKey ? `Alert key (${activeAlertKey})` : "Alert key"}
+            aria-label="Filter receipts by alert key"
+          />
+        </label>
+        <label className="search-control receipt-search-control">
+          <ClipboardList size={14} />
+          <input
+            value={deliveryId}
+            onChange={(event) => onDeliveryId(event.target.value)}
+            placeholder="Delivery id"
+            aria-label="Filter receipts by delivery id"
+          />
+        </label>
+        <label className="filter-control">
+          <SlidersHorizontal size={14} />
+          <select
+            value={order}
+            onChange={(event) => onOrder(event.target.value as "asc" | "desc")}
+            aria-label="Sort alert webhook receipts"
+          >
+            <option value="desc">Newest</option>
+            <option value="asc">Oldest</option>
+          </select>
+        </label>
+        <div className="delivery-control-actions">
+          <button className="secondary-button compact-action" type="submit" disabled={loading}>
+            {loading ? <Loader2 className="spin" size={15} /> : <Search size={15} />}
+            Search
+          </button>
+          <button
+            className="secondary-button compact-action"
+            type="button"
+            onClick={onUseActiveAlert}
+            disabled={loading || !activeAlertKey}
+            title={activeAlertKey ? "Use the selected alert key" : "Select an alert first"}
+          >
+            <Bell size={15} />
+            Active alert
+          </button>
+          <button className="secondary-button compact-action" type="button" onClick={onRefresh} disabled={loading}>
+            {loading ? <Loader2 className="spin" size={15} /> : <RefreshCw size={15} />}
+            Refresh
+          </button>
+        </div>
+      </form>
+
+      {error ? <div className="inline-error">{error}</div> : null}
+
+      <div className="delivery-dispatch-result state-neutral receipt-summary">
+        <div className="delivery-dispatch-copy">
+          <strong>{stats.receiptCount ? `${stats.receiptCount} receipt rows` : "No receipts loaded"}</strong>
+          <span>
+            Latest {ageLabel(stats.latestReceivedAt)}; newest delivery {stats.newestDeliveryId}.
+          </span>
+        </div>
+        <div className="delivery-dispatch-metrics">
+          <Metric label="Duplicates" value={String(stats.duplicateCount)} />
+          <Metric label="Events" value={String(stats.sampleEventCount)} />
+          <Metric label="Runs" value={String(stats.sampleRunCount)} />
+        </div>
+      </div>
+
+      {loading && rows.length === 0 ? <LoadingBlock /> : null}
+      {!loading && rows.length === 0 ? (
+        <PanelEmpty title="No webhook receipts" detail="Search by alert key or delivery id after a signed receiver accepts deliveries." />
+      ) : null}
+
+      <div className="delivery-list">
+        {rows.map((record) => {
+          const tone = alertWebhookReceiptTone(record);
+          const rowState = tone === "warn" ? "pending" : "sent";
+          return (
+            <article className={`delivery-row receipt-row state-${rowState}`} key={record.delivery_id}>
+              <div className="delivery-row-main">
+                <div className="delivery-row-title">
+                  <Badge tone={tone}>{record.duplicate_count ? "duplicate" : "received"}</Badge>
+                  <strong>{record.alert_key}</strong>
+                </div>
+                <span>Delivery {record.delivery_id}</span>
+                <div className="delivery-row-meta">
+                  <span>{record.severity}</span>
+                  <span>first {ageLabel(record.first_received_at)}</span>
+                  <span>last {ageLabel(record.last_received_at)}</span>
+                  <span>body {record.body_hash}</span>
+                </div>
+                <small>
+                  Receipt summaries store hashes, counts, and timestamps only; webhook body and headers are not shown.
+                </small>
+              </div>
+              <div className="delivery-row-side">
+                <Metric label="Alerts" value={String(record.alert_count)} />
+                <Metric label="Samples" value={`${record.sample_event_count}/${record.sample_run_count}`} />
+                <Metric label="Dupes" value={String(record.duplicate_count)} />
               </div>
             </article>
           );

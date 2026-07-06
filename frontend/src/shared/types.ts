@@ -711,6 +711,21 @@ export type AlertDeliveryRecord = {
   updated_at: string;
 };
 
+export type AlertWebhookReceiptRecord = {
+  delivery_id: string;
+  alert_key: string;
+  severity: "P0" | "P1" | "P2" | "P3";
+  body_hash: string;
+  alert_count: number;
+  sample_event_count: number;
+  sample_run_count: number;
+  duplicate_count: number;
+  first_received_at: string;
+  last_received_at: string;
+  created_at: string;
+  updated_at: string;
+};
+
 export type AlertDispatchReport = {
   webhook_enabled: boolean;
   enqueued_count: number;
@@ -823,7 +838,7 @@ export type IncidentBriefResponse = {
 export type IncidentTimelineEntry = {
   occurred_at: string;
   sequence: number;
-  source: "event_store" | "tool_audit" | "alert_delivery" | "run";
+  source: "event_store" | "tool_audit" | "alert_delivery" | "alert_webhook_receipt" | "run";
   event_type: string;
   title: string;
   detail: string;

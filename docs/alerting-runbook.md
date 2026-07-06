@@ -134,6 +134,13 @@ First response:
 
 - Open the console Delivery tab or call `/api/v1/admin/monitor/alert-deliveries`.
 - Check `dead`, `failed`, and `in_progress` rows.
+- If a row is `sent` but the downstream system claims no notification arrived,
+  open the console Receipts tab or call
+  `/api/v1/admin/monitor/alert-webhook-receipts?delivery_id=<delivery_id>` to
+  verify whether the signed receiver recorded the delivery. No receipt means
+  inspect receiver enablement, `X-PSA-*` signature secret, timestamp skew, and
+  ingress/network path; duplicate receipts indicate retry/idempotency behavior,
+  not another raw payload.
 - Requeue dead rows after the webhook destination is healthy, or close them with an operator note if handled elsewhere.
 
 Escalate when: alert delivery is failed while monitor triage health is degraded or critical.

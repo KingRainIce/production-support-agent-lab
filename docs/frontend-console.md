@@ -80,45 +80,48 @@ real local FastAPI endpoints:
    a retrieval diagnostic query.
 11. `POST /api/v1/admin/monitor/alert-deliveries/dispatch` when the `Delivery`
    tab runs `Dispatch now` against the durable alert outbox.
-12. `GET /api/v1/admin/monitor/drilldown` when the `Alerts` workbench switches
+12. `GET /api/v1/admin/monitor/alert-webhook-receipts` when the `Receipts`
+   tab inspects signed inbound webhook receipt summaries by alert key or
+   delivery id.
+13. `GET /api/v1/admin/monitor/drilldown` when the `Alerts` workbench switches
    from queue triage to event-level investigation by alert key, intent, risk,
    failure type, grounding, policy status, and human-review state.
-13. `POST /api/v1/admin/evals/regression-drafts` when an operator turns a
+14. `POST /api/v1/admin/evals/regression-drafts` when an operator turns a
    selected monitor event or response-feedback record into a copyable eval-case
    draft.
-14. `POST /api/v1/admin/event-store/backups` when the `Settings` workbench
+15. `POST /api/v1/admin/event-store/backups` when the `Settings` workbench
    creates a verified SQLite backup.
-15. `POST /api/v1/admin/event-store/restore-drills` when the `Settings`
+16. `POST /api/v1/admin/event-store/restore-drills` when the `Settings`
    workbench proves the latest verified backup can be opened and health-checked.
-16. `POST /api/v1/admin/event-store/retention` when the `Settings` workbench
+17. `POST /api/v1/admin/event-store/retention` when the `Settings` workbench
    previews or applies the conservative retention policy. Apply calls include
    backend-issued backup, restore-drill, and preview tokens plus explicit
    confirmation; the BFF refuses tokenless apply requests before proxying.
-17. `GET /api/v1/admin/event-store/operations` when `Settings` loads the
+18. `GET /api/v1/admin/event-store/operations` when `Settings` loads the
    durable event-store operation ledger for backup, restore-drill, retention
    preview, retention apply, and authenticated guard rejections.
-18. `GET /api/v1/admin/conversations/{conversation_id}/memory/replay` when
+19. `GET /api/v1/admin/conversations/{conversation_id}/memory/replay` when
    the `Memory` workbench rebuilds a conversation from append-only events.
-19. `GET /api/v1/admin/feedback` and
+20. `GET /api/v1/admin/feedback` and
    `GET /api/v1/admin/feedback/summary` when the `Feedback` workbench reviews
    user/operator ratings linked to persisted runs.
-20. `GET /api/v1/admin/feedback/review-queue` when the `Feedback` workbench
+21. `GET /api/v1/admin/feedback/review-queue` when the `Feedback` workbench
    shows unresolved, unassigned, stale, and reviewed backlog metrics.
-21. `GET /api/v1/admin/feedback/{feedback_id}/reviews` and
+22. `GET /api/v1/admin/feedback/{feedback_id}/reviews` and
    `POST /api/v1/admin/feedback/{feedback_id}/reviews` when the `Feedback`
    workbench loads or records the append-only operator review trail. Review
    writes send the current review-state fingerprint so stale tabs cannot
    append obsolete feedback decisions.
-22. `GET /api/v1/admin/promotion/decisions` and
+23. `GET /api/v1/admin/promotion/decisions` and
    `POST /api/v1/admin/promotion/decisions` when `Settings` shows or records
    append-only release decisions tied to a fresh promotion-gate snapshot.
-23. `GET /api/v1/admin/operations/slo-report` when `Overview` and `Settings`
+24. `GET /api/v1/admin/operations/slo-report` when `Overview` and `Settings`
    show service objectives, error-budget remaining, and breached/watch/no-data
    counts.
-24. `GET /api/v1/admin/operations/automation-plan` when `Settings` shows the
+25. `GET /api/v1/admin/operations/automation-plan` when `Settings` shows the
    read-only next-action queue for monitor, delivery, release, eval, feedback,
    tool-audit, and retrieval follow-up.
-25. `GET /api/v1/admin/audit/export` when `Settings` downloads sanitized
+26. `GET /api/v1/admin/audit/export` when `Settings` downloads sanitized
    NDJSON for SIEM or warehouse ingestion.
 
 ## Production Run
@@ -209,6 +212,12 @@ machine.
   run this cycle continuously; the console button is the operator fallback.
   The browser still calls only `/api/console/*`; production signing and request
   nonces stay inside the server-side `agentFetch` proxy.
+- Webhook receipt ledger from `GET /api/v1/admin/monitor/alert-webhook-receipts`.
+  The `Receipts` workbench tab searches by alert key or exact delivery id and
+  shows receiving-side proof: delivery id, alert key, severity, body hash,
+  duplicate count, sample counts, and first/last received timestamps. It is
+  read-only and intentionally does not show webhook body, headers, reason text,
+  source address, user-agent, signature value, or sample ids.
 - Monitor drilldown from persisted `monitor.reviewed` events. It reuses the
   alert queue context, shows backend bucket aggregates, and opens a sampled
   run through the same trace/evidence panel. For the selected event, it can
@@ -338,38 +347,42 @@ memory, safety, monitoring, and incident response.
    means proactive delivery is intentionally disabled; `Dispatch failed` means
    open the `Delivery` tab, click `Dispatch now`, and inspect failed/dead rows
    before resolving P0/P1 work.
-5. Switch the `Alerts` workbench to `Drilldown` when you need to inspect the
+5. Switch the `Alerts` workbench to `Receipts` after dispatching or during an
+   end-to-end webhook test to confirm the receiver accepted signed deliveries.
+   Search by the active alert key for recent proof, or paste a delivery id for
+   exact idempotency/duplicate checks.
+6. Switch the `Alerts` workbench to `Drilldown` when you need to inspect the
    actual monitor events behind an alert, compare failure buckets, or open a
    sampled run from the event list.
-6. Switch to `Runs` when you need historical investigation across users,
+7. Switch to `Runs` when you need historical investigation across users,
    conversations, routes, or tool error codes.
-7. Switch to `Tools` when the problem is a timeout, upstream error, replay, or
+8. Switch to `Tools` when the problem is a timeout, upstream error, replay, or
    suspected idempotency issue; open any audit row to hydrate its full run.
-8. Switch to `Knowledge` when the answer has weak citations, missing grounding,
+9. Switch to `Knowledge` when the answer has weak citations, missing grounding,
    or a suspected recall/rerank/query-rewrite issue.
-9. Switch to `Memory` when a later turn forgot facts, merged the wrong order,
+10. Switch to `Memory` when a later turn forgot facts, merged the wrong order,
    or behaved differently after a restart. Use `Current run` to replay the
    active conversation, or paste any conversation id from a support ticket.
-9. Use alert search to find a run, owner, alert reason, or event id.
-10. Assign the alert before investigation so ownership is explicit.
-11. Copy the browser URL when handing off to another operator; it preserves the
+11. Use alert search to find a run, owner, alert reason, or event id.
+12. Assign the alert before investigation so ownership is explicit.
+13. Copy the browser URL when handing off to another operator; it preserves the
    selected run, alert, workspace, evidence tab, and queue filters.
-12. Open `Brief` first for the operator summary and recommended next actions.
-13. Drill into `Citations`, `Tool Audit`, and `Memory` only when the brief points
+14. Open `Brief` first for the operator summary and recommended next actions.
+15. Drill into `Citations`, `Tool Audit`, and `Memory` only when the brief points
    at missing grounding, tool failures, or replay questions.
-14. In `Drilldown`, select the monitor event and use `Draft eval` to preview a
+16. In `Drilldown`, select the monitor event and use `Draft eval` to preview a
    regression case. The backend chooses the closest file, such as
    `security_regression.json` or `tool_failure_regression.json`, and validates
    the draft against the strict eval schema.
-15. Run the eval gate in local/staging before promoting prompt, routing, tool, or
+17. Run the eval gate in local/staging before promoting prompt, routing, tool, or
    policy changes. Check the persisted history row so the reviewer can see who
    ran it, when, against which run/alert context, and whether any cases failed.
-16. Use `Settings` before release: inspect `Release Preflight` and do not
+18. Use `Settings` before release: inspect `Release Preflight` and do not
    promote while readiness, monitor, tool-audit, feedback, or eval checks are blocked.
    In `Operations Automation`, run only `auto-safe` actions from a fresh
    snapshot; manual actions still require the normal operator workflow.
-17. Use `Settings` before manual cleanup: create a verified backup, run restore
+19. Use `Settings` before manual cleanup: create a verified backup, run restore
    drill, preview retention, then apply only after reviewing the table-level
    candidate counts. After each step, refresh the `Operation Ledger` and confirm
    the completed/rejected rows match the action you intended to take.
-18. Resolve only after the triage note explains customer impact and mitigation.
+20. Resolve only after the triage note explains customer impact and mitigation.

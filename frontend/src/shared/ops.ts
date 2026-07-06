@@ -12,6 +12,7 @@ import type {
   MonitorAlert,
   MonitorAlertDeliverySummary,
   AlertDeliveryRecord,
+  AlertWebhookReceiptRecord,
   MonitorDrilldownResponse,
   PromotionGateResponse,
   MonitorTriageMetricsResponse,
@@ -125,6 +126,15 @@ export type MonitorAlertDeliveryStats = {
   dispatcherStatus: MonitorAlertDeliverySummary["dispatcher_status"];
   dispatcherLabel: string;
   dispatcherLastSeenAt: string | null;
+};
+
+export type AlertWebhookReceiptStats = {
+  receiptCount: number;
+  duplicateCount: number;
+  sampleEventCount: number;
+  sampleRunCount: number;
+  latestReceivedAt: string | null;
+  newestDeliveryId: string;
 };
 
 export type AlertDispatchResultStats = {
@@ -774,6 +784,26 @@ export function deliveryStatusTone(status: AlertDeliveryRecord["status"]): Tone 
     return "neutral";
   }
   return "success";
+}
+
+export function alertWebhookReceiptTone(record: AlertWebhookReceiptRecord): Tone {
+  return record.duplicate_count > 0 ? "warn" : "success";
+}
+
+export function buildAlertWebhookReceiptStats(
+  records: AlertWebhookReceiptRecord[]
+): AlertWebhookReceiptStats {
+  const latest = records
+    .slice()
+    .sort((left, right) => Date.parse(right.last_received_at) - Date.parse(left.last_received_at))[0];
+  return {
+    receiptCount: records.length,
+    duplicateCount: records.reduce((total, record) => total + record.duplicate_count, 0),
+    sampleEventCount: records.reduce((total, record) => total + record.sample_event_count, 0),
+    sampleRunCount: records.reduce((total, record) => total + record.sample_run_count, 0),
+    latestReceivedAt: latest?.last_received_at ?? null,
+    newestDeliveryId: latest?.delivery_id ?? "none"
+  };
 }
 
 export function buildAlertDispatchResultStats(
