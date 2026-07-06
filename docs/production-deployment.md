@@ -399,6 +399,18 @@ invalidate the backup/preview guard tokens. Operators can review it through
 `GET /api/v1/admin/event-store/operations`, the Settings operation ledger, or
 the audit NDJSON export.
 
+The API and CLI also share a durable `event_store_operation_locks` lease table.
+Backup, restore-drill, retention preview, and retention apply all acquire the
+same tenant-scoped `event_store_maintenance` lock before reading high-water
+marks, issuing operation tokens, or deleting rows. A concurrent maintenance
+request returns `409 Conflict` from HTTP or a non-zero CLI exit, and the
+operation ledger records the active operation, expiry time, and an owner hash
+without exposing raw owner ids. The default lease is 1800 seconds and is
+controlled by `APP_EVENT_STORE_OPERATION_LOCK_TTL_SECONDS`; expired locks are
+removed atomically before a new operation is allowed to proceed. The lock table
+is included in backup and restore-drill schema verification, but it is excluded
+from retention high-water marks for the same reason as the operation ledger.
+
 Monitor summary, events, and drilldown endpoints support `source=event_store`,
 `created_after`, `created_before`, and `order=desc|asc` for durable production
 investigation after a process restart. `GET /api/v1/admin/monitor/drilldown`

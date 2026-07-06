@@ -6,6 +6,8 @@ import shutil
 import sqlite3
 import tempfile
 import time
+from collections.abc import Iterator
+from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -180,6 +182,15 @@ class EventStoreOperationRecord(BaseModel):
     created_at: str
 
 
+class EventStoreOperationLock(BaseModel):
+    tenant_id: str
+    lock_name: str
+    owner_id: str
+    operation: str
+    acquired_at: str
+    expires_at: str
+
+
 EVAL_GATE_EVENT_TYPE = "eval.gate.completed"
 ALERT_DELIVERY_ENQUEUED_EVENT_TYPE = "monitor.alert.delivery.enqueued"
 ALERT_DELIVERY_ATTEMPTED_EVENT_TYPE = "monitor.alert.delivery.attempted"
@@ -196,6 +207,7 @@ SQLITE_REQUIRED_TABLES = (
     "api_rate_limits",
     "alert_delivery_outbox",
     "event_store_operations",
+    "event_store_operation_locks",
 )
 SQLITE_EVENTS_REQUIRED_COLUMNS = {
     "id",
@@ -216,10 +228,28 @@ SQLITE_EVENT_STORE_OPERATIONS_REQUIRED_COLUMNS = {
     "summary_json",
     "created_at",
 }
+SQLITE_EVENT_STORE_OPERATION_LOCKS_REQUIRED_COLUMNS = {
+    "tenant_id",
+    "lock_name",
+    "owner_id",
+    "operation",
+    "acquired_at",
+    "expires_at",
+}
 
 
 class AlertDeliveryLockLostError(RuntimeError):
     """Raised when a dispatcher tries to complete a delivery it no longer owns."""
+
+
+class EventStoreOperationLockConflict(RuntimeError):
+    """Raised when another maintenance operation holds the event-store lock."""
+
+    def __init__(self, active_lock: EventStoreOperationLock) -> None:
+        self.active_lock = active_lock
+        super().__init__(
+            f"Event-store maintenance lock is held for {active_lock.operation} until {active_lock.expires_at}"
+        )
 
 
 def _rate(numerator: int, denominator: int) -> float:
@@ -1712,6 +1742,99 @@ class SQLiteEventStore:
             for row in rows
         ]
 
+    @contextmanager
+    def event_store_operation_lock(
+        self,
+        *,
+        tenant_id: str,
+        lock_name: str,
+        operation: str,
+        owner_id: str | None = None,
+        ttl_seconds: int = 1800,
+        now: datetime | None = None,
+    ) -> Iterator[EventStoreOperationLock]:
+        lock = self.acquire_event_store_operation_lock(
+            tenant_id=tenant_id,
+            lock_name=lock_name,
+            operation=operation,
+            owner_id=owner_id,
+            ttl_seconds=ttl_seconds,
+            now=now,
+        )
+        try:
+            yield lock
+        finally:
+            self.release_event_store_operation_lock(lock)
+
+    def acquire_event_store_operation_lock(
+        self,
+        *,
+        tenant_id: str,
+        lock_name: str,
+        operation: str,
+        owner_id: str | None = None,
+        ttl_seconds: int = 1800,
+        now: datetime | None = None,
+    ) -> EventStoreOperationLock:
+        effective_now = now or utc_now()
+        if effective_now.tzinfo is None:
+            effective_now = effective_now.replace(tzinfo=timezone.utc)
+        ttl_seconds = max(1, int(ttl_seconds))
+        lock = EventStoreOperationLock(
+            tenant_id=tenant_id,
+            lock_name=lock_name,
+            owner_id=owner_id or new_id("evt_lock"),
+            operation=operation,
+            acquired_at=effective_now.isoformat(),
+            expires_at=(effective_now + timedelta(seconds=ttl_seconds)).isoformat(),
+        )
+        with self._connect() as conn:
+            conn.execute("begin immediate")
+            conn.execute(
+                """
+                delete from event_store_operation_locks
+                where tenant_id = ? and lock_name = ? and expires_at <= ?
+                """,
+                (tenant_id, lock_name, effective_now.isoformat()),
+            )
+            active = conn.execute(
+                """
+                select tenant_id, lock_name, owner_id, operation, acquired_at, expires_at
+                from event_store_operation_locks
+                where tenant_id = ? and lock_name = ?
+                """,
+                (tenant_id, lock_name),
+            ).fetchone()
+            if active:
+                raise EventStoreOperationLockConflict(self._event_store_operation_lock_from_row(active))
+            conn.execute(
+                """
+                insert into event_store_operation_locks (
+                  tenant_id, lock_name, owner_id, operation, acquired_at, expires_at
+                ) values (?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    lock.tenant_id,
+                    lock.lock_name,
+                    lock.owner_id,
+                    lock.operation,
+                    lock.acquired_at,
+                    lock.expires_at,
+                ),
+            )
+        return lock
+
+    def release_event_store_operation_lock(self, lock: EventStoreOperationLock) -> bool:
+        with self._connect() as conn:
+            cursor = conn.execute(
+                """
+                delete from event_store_operation_locks
+                where tenant_id = ? and lock_name = ? and owner_id = ?
+                """,
+                (lock.tenant_id, lock.lock_name, lock.owner_id),
+            )
+        return cursor.rowcount > 0
+
     def append_tool_audit(self, record: ToolAuditRecord) -> None:
         with self._connect() as conn:
             conn.execute(
@@ -2403,6 +2526,20 @@ class SQLiteEventStore:
                 raise RuntimeError(
                     f"event_store_operations table missing columns: {', '.join(operation_missing)}"
                 )
+            operation_locks = conn.execute(
+                "select name from sqlite_master where type = 'table' and name = 'event_store_operation_locks'"
+            ).fetchone()
+            if not operation_locks:
+                raise RuntimeError("event_store_operation_locks table is missing")
+            lock_columns = {
+                item["name"]
+                for item in conn.execute("pragma table_info(event_store_operation_locks)").fetchall()
+            }
+            lock_missing = sorted(SQLITE_EVENT_STORE_OPERATION_LOCKS_REQUIRED_COLUMNS - lock_columns)
+            if lock_missing:
+                raise RuntimeError(
+                    f"event_store_operation_locks table missing columns: {', '.join(lock_missing)}"
+                )
             conn.execute("begin immediate")
             conn.execute(
                 """
@@ -2461,6 +2598,15 @@ class SQLiteEventStore:
             if operation_missing:
                 raise RuntimeError(
                     f"event_store_operations table missing columns: {', '.join(operation_missing)}"
+                )
+            lock_columns = {
+                item["name"]
+                for item in conn.execute("pragma table_info(event_store_operation_locks)").fetchall()
+            }
+            lock_missing = sorted(SQLITE_EVENT_STORE_OPERATION_LOCKS_REQUIRED_COLUMNS - lock_columns)
+            if lock_missing:
+                raise RuntimeError(
+                    f"event_store_operation_locks table missing columns: {', '.join(lock_missing)}"
                 )
             table_counts = {
                 table_name: int(conn.execute(f"select count(*) from {table_name}").fetchone()[0])
@@ -2539,6 +2685,16 @@ class SQLiteEventStore:
             key: row[key]
             for key in row.keys()
         }
+
+    def _event_store_operation_lock_from_row(self, row: sqlite3.Row) -> EventStoreOperationLock:
+        return EventStoreOperationLock(
+            tenant_id=row["tenant_id"],
+            lock_name=row["lock_name"],
+            owner_id=row["owner_id"],
+            operation=row["operation"],
+            acquired_at=row["acquired_at"],
+            expires_at=row["expires_at"],
+        )
 
     def _connect(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self.path, timeout=self.SQLITE_BUSY_TIMEOUT_MS / 1000)
@@ -2720,6 +2876,34 @@ class SQLiteEventStore:
             )
             conn.execute(
                 "create index if not exists idx_event_store_operations_tenant_status_created on event_store_operations(tenant_id, status, created_at)"
+            )
+            conn.execute(
+                """
+                create table if not exists event_store_operation_locks (
+                  tenant_id text not null,
+                  lock_name text not null,
+                  owner_id text not null,
+                  operation text not null,
+                  acquired_at text not null,
+                  expires_at text not null,
+                  primary key (tenant_id, lock_name)
+                )
+                """
+            )
+            lock_columns = {
+                item["name"]
+                for item in conn.execute("pragma table_info(event_store_operation_locks)").fetchall()
+            }
+            for column_name, column_type in {
+                "owner_id": "text not null default ''",
+                "operation": "text not null default ''",
+                "acquired_at": "text not null default ''",
+                "expires_at": "text not null default ''",
+            }.items():
+                if column_name not in lock_columns:
+                    conn.execute(f"alter table event_store_operation_locks add column {column_name} {column_type}")
+            conn.execute(
+                "create index if not exists idx_event_store_operation_locks_expires on event_store_operation_locks(expires_at)"
             )
             conn.execute(
                 """

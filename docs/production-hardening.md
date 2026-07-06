@@ -11,7 +11,7 @@
 | Knowledge | HTTPKnowledgeIndex 调真实 knowledge service，内置有限重试和进程内断路器 | pgvector + BM25 + reranker |
 | OnlineMonitorAgent | 同进程 summary + SQLite event-store summary + append-only triage events + alert delivery outbox | Queue worker + OLAP/dashboard + notification gateway |
 | LLMGateway | OpenAI Responses API，内置有限重试、grounded draft fallback 和进程内断路器 | Provider routing + fallback model + budget |
-| SQLiteEventStore | local/production SQLite events + tool idempotency records + tool audit records + alert delivery outbox + event-store operation ledger + production rate-limit buckets; WAL, busy timeout, `synchronous=NORMAL` | Postgres append-only events + Kafka stream + distributed outbox |
+| SQLiteEventStore | local/production SQLite events + tool idempotency records + tool audit records + alert delivery outbox + event-store operation ledger + operation lease lock + production rate-limit buckets; WAL, busy timeout, `synchronous=NORMAL` | Postgres append-only events + Kafka stream + distributed outbox + distributed lease |
 | Tool and operation audit | SQLite `tool_audit_records` + `event_store_operations` + 进程内 recent audit_log + `/api/v1/admin/tools/audit` + `/api/v1/admin/event-store/operations` + `/api/v1/admin/audit/export` | SIEM / warehouse / audit center |
 | PolicyEngine | regex + rule | PII detector + RBAC + compliance engine |
 | API auth | `X-Internal-Auth` + HMAC-signed `X-Actor-*` claims + request method/path/body hash/nonce signature + SQLite nonce replay table + local memory / production SQLite rate limit | mTLS/JWT, centralized Redis/Postgres nonce and rate-limit state, tenant isolation |
@@ -38,7 +38,7 @@
 
 所有表都带 `tenant_id`。
 
-当前 SQLite baseline 已提供在线备份、恢复演练和 retention 操作：`python scripts/event_store_ops.py ... backup` 会复制并校验数据库；`... restore-drill` 会把备份复制到 scratch DB，校验 schema、执行 health check、输出表计数和 high-water mark；`... retention` 默认 dry-run，`--apply` 才删除，`--include-events` 才会清理 append-only event log。生产发布前应先备份，再跑 restore drill，再预演 retention JSON，最后通过 Console/API 执行受 token 保护的 apply；生产环境 CLI 直连 `retention --apply` 默认拒绝并写入 operation ledger，只有应急本地操作显式加 `--unsafe-local-apply` 才会执行。CLI 的 backup、restore-drill、retention preview/apply 以及失败/拒绝都会写 `event_store_operations`，摘要只保留文件名、路径哈希、计数和短错误信息。
+当前 SQLite baseline 已提供在线备份、恢复演练和 retention 操作：`python scripts/event_store_ops.py ... backup` 会复制并校验数据库；`... restore-drill` 会把备份复制到 scratch DB，校验 schema、执行 health check、输出表计数和 high-water mark；`... retention` 默认 dry-run，`--apply` 才删除，`--include-events` 才会清理 append-only event log。生产发布前应先备份，再跑 restore drill，再预演 retention JSON，最后通过 Console/API 执行受 token 保护的 apply；生产环境 CLI 直连 `retention --apply` 默认拒绝并写入 operation ledger，只有应急本地操作显式加 `--unsafe-local-apply` 才会执行。API 和 CLI 的 backup、restore-drill、retention preview/apply 都会先获取 `event_store_operation_locks` 里的 tenant 级租约锁，避免多个实例或本地脚本并发生成 token、复制备份或删除数据；锁冲突会写 rejected ledger，摘要只保留 active operation、过期时间和 owner hash。CLI 的 backup、restore-drill、retention preview/apply 以及失败/拒绝都会写 `event_store_operations`，摘要只保留文件名、路径哈希、计数和短错误信息。
 
 ## 安全
 

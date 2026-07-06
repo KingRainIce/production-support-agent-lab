@@ -3060,6 +3060,50 @@ def test_admin_can_create_event_store_backup_in_configured_directory(tmp_path, m
     assert "release-one" in backup_path.name
 
 
+def test_event_store_backup_rejects_when_maintenance_lock_is_active(tmp_path, monkeypatch):
+    backup_dir = tmp_path / "configured_backups"
+    monkeypatch.setenv("APP_DATABASE_URL", f"sqlite:///{tmp_path / 'events.db'}")
+    monkeypatch.setenv("APP_EVENT_STORE_BACKUP_DIR", str(backup_dir))
+    get_settings.cache_clear()
+    app_container = create_container()
+    event_store = app_container.event_store
+    assert event_store is not None
+    event_store.acquire_event_store_operation_lock(
+        tenant_id="demo_tenant",
+        lock_name="event_store_maintenance",
+        operation="retention_apply",
+        owner_id="external_operator_session",
+        ttl_seconds=3600,
+    )
+    app.dependency_overrides[get_container] = lambda: app_container
+    try:
+        client = TestClient(app)
+        response = client.post(
+            "/api/v1/admin/event-store/backups",
+            headers={"X-Demo-Role": "admin"},
+            json={"label": "locked"},
+        )
+        operations = event_store.list_event_store_operations(
+            tenant_id="demo_tenant",
+            operation="backup",
+        )
+    finally:
+        app.dependency_overrides.clear()
+        get_settings.cache_clear()
+    operations_json = json.dumps([record.model_dump(mode="json") for record in operations])
+
+    assert response.status_code == 409
+    assert "Another event-store maintenance operation is already running" in response.json()["detail"]
+    assert "retention_apply" in response.json()["detail"]
+    assert len(operations) == 1
+    assert operations[0].status == "rejected"
+    assert operations[0].summary["lock_name"] == "event_store_maintenance"
+    assert operations[0].summary["active_operation"] == "retention_apply"
+    assert operations[0].summary["active_owner_hash"]
+    assert "external_operator_session" not in response.text
+    assert "external_operator_session" not in operations_json
+
+
 def test_admin_can_run_event_store_restore_drill_from_verified_backup(tmp_path, monkeypatch):
     backup_dir = tmp_path / "configured_backups"
     monkeypatch.setenv("APP_DATABASE_URL", f"sqlite:///{tmp_path / 'events.db'}")

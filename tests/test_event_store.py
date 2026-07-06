@@ -9,7 +9,11 @@ from pydantic import BaseModel
 from support_agent_lab.agent.orchestrator import SupportAgentOrchestrator
 from support_agent_lab.data.fixtures import DemoStore
 from support_agent_lab.llm.gateway import create_default_llm_gateway
-from support_agent_lab.memory.event_store import SQLiteEventStore, StoredEvent
+from support_agent_lab.memory.event_store import (
+    EventStoreOperationLockConflict,
+    SQLiteEventStore,
+    StoredEvent,
+)
 from support_agent_lab.memory.event_store import EVAL_GATE_EVENT_TYPE
 from support_agent_lab.memory.replay import replay_conversation_memory
 from support_agent_lab.memory.store import ConversationMemory, KnowledgeIndex
@@ -42,6 +46,62 @@ from support_agent_lab.tools.registry import (
     ToolDefinition,
     ToolRegistry,
 )
+
+
+def test_event_store_operation_lock_rejects_concurrent_holders_and_expires(tmp_path):
+    event_store = SQLiteEventStore(tmp_path / "events.db")
+    base_time = utc_now()
+
+    active = event_store.acquire_event_store_operation_lock(
+        tenant_id="tenant_ops",
+        lock_name="event_store_maintenance",
+        operation="backup",
+        owner_id="owner_a",
+        ttl_seconds=60,
+        now=base_time,
+    )
+    with pytest.raises(EventStoreOperationLockConflict) as exc_info:
+        event_store.acquire_event_store_operation_lock(
+            tenant_id="tenant_ops",
+            lock_name="event_store_maintenance",
+            operation="retention_apply",
+            owner_id="owner_b",
+            ttl_seconds=60,
+            now=base_time + timedelta(seconds=1),
+        )
+    assert exc_info.value.active_lock.owner_id == "owner_a"
+    assert exc_info.value.active_lock.operation == "backup"
+
+    assert event_store.release_event_store_operation_lock(active) is True
+    reacquired = event_store.acquire_event_store_operation_lock(
+        tenant_id="tenant_ops",
+        lock_name="event_store_maintenance",
+        operation="retention_apply",
+        owner_id="owner_b",
+        ttl_seconds=60,
+        now=base_time + timedelta(seconds=2),
+    )
+    assert reacquired.owner_id == "owner_b"
+    assert event_store.release_event_store_operation_lock(reacquired) is True
+
+    expired = event_store.acquire_event_store_operation_lock(
+        tenant_id="tenant_ops",
+        lock_name="event_store_maintenance",
+        operation="backup",
+        owner_id="owner_expired",
+        ttl_seconds=1,
+        now=base_time,
+    )
+    takeover = event_store.acquire_event_store_operation_lock(
+        tenant_id="tenant_ops",
+        lock_name="event_store_maintenance",
+        operation="restore_drill",
+        owner_id="owner_takeover",
+        ttl_seconds=60,
+        now=base_time + timedelta(seconds=2),
+    )
+    assert expired.owner_id == "owner_expired"
+    assert takeover.owner_id == "owner_takeover"
 
 
 @pytest.mark.asyncio

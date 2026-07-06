@@ -130,6 +130,53 @@ def test_cli_backup_failure_ledger_redacts_local_paths(tmp_path, monkeypatch, ca
     assert str(tmp_path) not in summary_json
 
 
+def test_cli_operation_lock_rejects_parallel_backup_and_writes_ledger(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("APP_ENV", "local")
+    monkeypatch.setenv("APP_TENANT_ID", "tenant_cli")
+    db_path = tmp_path / "events.db"
+    backup_path = tmp_path / "backups" / "events.backup.db"
+    event_store = SQLiteEventStore(db_path)
+    event_store.acquire_event_store_operation_lock(
+        tenant_id="tenant_cli",
+        lock_name="event_store_maintenance",
+        operation="retention_apply",
+        owner_id="external_operator_session",
+        ttl_seconds=3600,
+    )
+
+    exit_code = event_store_ops_main(
+        [
+            "--database-url",
+            _db_url(db_path),
+            "--actor-user-id",
+            "release_bot",
+            "backup",
+            "--tenant-id",
+            "tenant_cli",
+            "--output",
+            str(backup_path),
+        ]
+    )
+    captured = capsys.readouterr()
+    records = SQLiteEventStore(db_path).list_event_store_operations(
+        tenant_id="tenant_cli",
+        operation="backup",
+    )
+    summary_json = json.dumps(records[0].summary, ensure_ascii=False, sort_keys=True)
+
+    assert exit_code == 1
+    assert "maintenance lock is held" in captured.err
+    assert not backup_path.exists()
+    assert len(records) == 1
+    assert records[0].actor_user_id == "release_bot"
+    assert records[0].status == "rejected"
+    assert records[0].summary["source"] == "cli"
+    assert records[0].summary["lock_name"] == "event_store_maintenance"
+    assert records[0].summary["active_operation"] == "retention_apply"
+    assert records[0].summary["active_owner_hash"]
+    assert "external_operator_session" not in summary_json
+
+
 def test_production_retention_apply_can_be_explicitly_unsafe_and_is_ledgered(
     tmp_path,
     monkeypatch,

@@ -44,6 +44,7 @@ from support_agent_lab.api.metrics import InMemoryHTTPMetrics, PROMETHEUS_CONTEN
 from support_agent_lab.evals.suites import STAGING_EVAL_SUITES
 from support_agent_lab.memory.event_store import (
     EVAL_GATE_EVENT_TYPE,
+    EventStoreOperationLockConflict,
     EventStoreOperationRecord,
     EventStoreRetentionReport,
     FEEDBACK_EVENT_TYPE,
@@ -419,6 +420,7 @@ EVENT_STORE_OPERATION_BACKUP = "backup"
 EVENT_STORE_OPERATION_RESTORE_DRILL = "restore_drill"
 EVENT_STORE_OPERATION_RETENTION_PREVIEW = "retention_preview"
 EVENT_STORE_OPERATION_RETENTION_APPLY = "retention_apply"
+EVENT_STORE_MAINTENANCE_LOCK_NAME = "event_store_maintenance"
 CORRELATION_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
 
 
@@ -4228,6 +4230,30 @@ def _operation_error_summary(exc: Exception) -> dict[str, Any]:
     }
 
 
+def _event_store_operation_lock_owner(*, actor: RequestActor, operation: str) -> str:
+    return f"{actor.user_id}:{operation}:{new_id('evt_lock')}"
+
+
+def _event_store_operation_lock_conflict_summary(exc: EventStoreOperationLockConflict) -> dict[str, Any]:
+    active = exc.active_lock
+    return {
+        "lock_name": active.lock_name,
+        "active_operation": active.operation,
+        "active_owner_hash": _audit_hash(active.owner_id),
+        "active_acquired_at": active.acquired_at,
+        "active_expires_at": active.expires_at,
+        **_operation_error_summary(exc),
+    }
+
+
+def _event_store_operation_lock_conflict_detail(exc: EventStoreOperationLockConflict) -> str:
+    active = exc.active_lock
+    return (
+        "Another event-store maintenance operation is already running "
+        f"({active.operation}); retry after {active.expires_at}."
+    )
+
+
 def _path_audit_summary(path_value: str | None) -> dict[str, Any]:
     if not path_value:
         return {"file": None, "path_hash": None}
@@ -6124,23 +6150,30 @@ def create_app() -> FastAPI:
         suffix = f"-{label}" if label else ""
         target_path = backup_dir / f"support-agent-lab-{tenant_label}-{timestamp}{suffix}.db"
         try:
-            report = deps.event_store.backup_to(
-                target_path,
-                overwrite=body.overwrite,
-                verify=True,
-            )
-            high_water_mark = deps.event_store.retention_high_water_mark(
+            with deps.event_store.event_store_operation_lock(
                 tenant_id=deps.settings.app_tenant_id,
-            )
-            backup_token = _sign_event_store_operation_token(
-                deps.settings,
-                _event_store_backup_token_payload(
-                    report=report,
-                    settings=deps.settings,
-                    actor=actor,
-                    high_water_mark=high_water_mark,
-                ),
-            )
+                lock_name=EVENT_STORE_MAINTENANCE_LOCK_NAME,
+                operation=EVENT_STORE_OPERATION_BACKUP,
+                owner_id=_event_store_operation_lock_owner(actor=actor, operation=EVENT_STORE_OPERATION_BACKUP),
+                ttl_seconds=deps.settings.app_event_store_operation_lock_ttl_seconds,
+            ):
+                report = deps.event_store.backup_to(
+                    target_path,
+                    overwrite=body.overwrite,
+                    verify=True,
+                )
+                high_water_mark = deps.event_store.retention_high_water_mark(
+                    tenant_id=deps.settings.app_tenant_id,
+                )
+                backup_token = _sign_event_store_operation_token(
+                    deps.settings,
+                    _event_store_backup_token_payload(
+                        report=report,
+                        settings=deps.settings,
+                        actor=actor,
+                        high_water_mark=high_water_mark,
+                    ),
+                )
             response = report.model_copy(update={"backup_token": backup_token})
             _append_event_store_operation_record(
                 deps=deps,
@@ -6154,6 +6187,19 @@ def create_app() -> FastAPI:
                 ),
             )
             return response
+        except EventStoreOperationLockConflict as exc:
+            _append_event_store_operation_record(
+                deps=deps,
+                actor=actor,
+                operation=EVENT_STORE_OPERATION_BACKUP,
+                status="rejected",
+                summary={
+                    "label": label or None,
+                    "target_file": target_path.name,
+                    **_event_store_operation_lock_conflict_summary(exc),
+                },
+            )
+            raise HTTPException(status_code=409, detail=_event_store_operation_lock_conflict_detail(exc)) from exc
         except FileExistsError as exc:
             _append_event_store_operation_record(
                 deps=deps,
@@ -6207,30 +6253,37 @@ def create_app() -> FastAPI:
         if not deps.event_store:
             raise HTTPException(status_code=404, detail="Event store is not configured")
         try:
-            backup_payload = _event_store_backup_payload_from_token(
-                token=body.backup_token,
-                deps=deps,
-                actor=actor,
-            )
-            backup_path = _event_store_backup_path_from_payload(backup_payload=backup_payload, deps=deps)
-            report = deps.event_store.restore_drill(
-                backup_path,
+            with deps.event_store.event_store_operation_lock(
                 tenant_id=deps.settings.app_tenant_id,
-            )
-            if report.high_water_mark != backup_payload.get("high_water_mark"):
-                raise HTTPException(
-                    status_code=409,
-                    detail="Restore drill high-water mark does not match the verified backup token.",
-                )
-            restore_drill_token = _sign_event_store_operation_token(
-                deps.settings,
-                _event_store_restore_drill_token_payload(
-                    report=report,
-                    settings=deps.settings,
+                lock_name=EVENT_STORE_MAINTENANCE_LOCK_NAME,
+                operation=EVENT_STORE_OPERATION_RESTORE_DRILL,
+                owner_id=_event_store_operation_lock_owner(actor=actor, operation=EVENT_STORE_OPERATION_RESTORE_DRILL),
+                ttl_seconds=deps.settings.app_event_store_operation_lock_ttl_seconds,
+            ):
+                backup_payload = _event_store_backup_payload_from_token(
+                    token=body.backup_token,
+                    deps=deps,
                     actor=actor,
-                    backup_token=body.backup_token,
-                ),
-            )
+                )
+                backup_path = _event_store_backup_path_from_payload(backup_payload=backup_payload, deps=deps)
+                report = deps.event_store.restore_drill(
+                    backup_path,
+                    tenant_id=deps.settings.app_tenant_id,
+                )
+                if report.high_water_mark != backup_payload.get("high_water_mark"):
+                    raise HTTPException(
+                        status_code=409,
+                        detail="Restore drill high-water mark does not match the verified backup token.",
+                    )
+                restore_drill_token = _sign_event_store_operation_token(
+                    deps.settings,
+                    _event_store_restore_drill_token_payload(
+                        report=report,
+                        settings=deps.settings,
+                        actor=actor,
+                        backup_token=body.backup_token,
+                    ),
+                )
             response = report.model_copy(update={"restore_drill_token": restore_drill_token})
             _append_event_store_operation_record(
                 deps=deps,
@@ -6243,6 +6296,18 @@ def create_app() -> FastAPI:
                 ),
             )
             return response
+        except EventStoreOperationLockConflict as exc:
+            _append_event_store_operation_record(
+                deps=deps,
+                actor=actor,
+                operation=EVENT_STORE_OPERATION_RESTORE_DRILL,
+                status="rejected",
+                summary={
+                    "backup_token_hash": _audit_hash(body.backup_token),
+                    **_event_store_operation_lock_conflict_summary(exc),
+                },
+            )
+            raise HTTPException(status_code=409, detail=_event_store_operation_lock_conflict_detail(exc)) from exc
         except HTTPException as exc:
             _append_event_store_operation_record(
                 deps=deps,
@@ -6312,57 +6377,77 @@ def create_app() -> FastAPI:
             else EVENT_STORE_OPERATION_RETENTION_APPLY
         )
         try:
-            if not body.dry_run:
-                apply_now = _assert_retention_apply_is_guarded(
-                    body=body,
-                    deps=deps,
-                    actor=actor,
-                    params=params,
-                )
-            report = deps.event_store.apply_retention_policy(
+            with deps.event_store.event_store_operation_lock(
                 tenant_id=deps.settings.app_tenant_id,
-                dry_run=body.dry_run,
-                include_events=params["include_events"],
-                vacuum=params["vacuum"],
-                event_retention_days=params["event_retention_days"],
-                tool_audit_retention_days=params["tool_audit_retention_days"],
-                idempotency_retention_days=params["idempotency_retention_days"],
-                alert_delivery_retention_days=params["alert_delivery_retention_days"],
-                now=apply_now,
-            )
-            if not body.dry_run:
+                lock_name=EVENT_STORE_MAINTENANCE_LOCK_NAME,
+                operation=operation,
+                owner_id=_event_store_operation_lock_owner(actor=actor, operation=operation),
+                ttl_seconds=deps.settings.app_event_store_operation_lock_ttl_seconds,
+            ):
+                if not body.dry_run:
+                    apply_now = _assert_retention_apply_is_guarded(
+                        body=body,
+                        deps=deps,
+                        actor=actor,
+                        params=params,
+                    )
+                report = deps.event_store.apply_retention_policy(
+                    tenant_id=deps.settings.app_tenant_id,
+                    dry_run=body.dry_run,
+                    include_events=params["include_events"],
+                    vacuum=params["vacuum"],
+                    event_retention_days=params["event_retention_days"],
+                    tool_audit_retention_days=params["tool_audit_retention_days"],
+                    idempotency_retention_days=params["idempotency_retention_days"],
+                    alert_delivery_retention_days=params["alert_delivery_retention_days"],
+                    now=apply_now,
+                )
+                if not body.dry_run:
+                    _append_event_store_operation_record(
+                        deps=deps,
+                        actor=actor,
+                        operation=operation,
+                        status="completed",
+                        summary=_retention_operation_summary(report=report, params=params),
+                    )
+                    return report
+                high_water_mark = deps.event_store.retention_high_water_mark(
+                    tenant_id=deps.settings.app_tenant_id,
+                )
+                preview_now = report.started_at.isoformat()
+                preview_token = _sign_event_store_operation_token(
+                    deps.settings,
+                    _event_store_preview_token_payload(
+                        report=report,
+                        settings=deps.settings,
+                        actor=actor,
+                        params=params,
+                        high_water_mark=high_water_mark,
+                        preview_now=preview_now,
+                    ),
+                )
+                response = report.model_copy(update={"preview_token": preview_token})
                 _append_event_store_operation_record(
                     deps=deps,
                     actor=actor,
                     operation=operation,
                     status="completed",
-                    summary=_retention_operation_summary(report=report, params=params),
+                    summary=_retention_operation_summary(report=response, params=params),
                 )
-                return report
-            high_water_mark = deps.event_store.retention_high_water_mark(
-                tenant_id=deps.settings.app_tenant_id,
-            )
-            preview_now = report.started_at.isoformat()
-            preview_token = _sign_event_store_operation_token(
-                deps.settings,
-                _event_store_preview_token_payload(
-                    report=report,
-                    settings=deps.settings,
-                    actor=actor,
-                    params=params,
-                    high_water_mark=high_water_mark,
-                    preview_now=preview_now,
-                ),
-            )
-            response = report.model_copy(update={"preview_token": preview_token})
+                return response
+        except EventStoreOperationLockConflict as exc:
             _append_event_store_operation_record(
                 deps=deps,
                 actor=actor,
                 operation=operation,
-                status="completed",
-                summary=_retention_operation_summary(report=response, params=params),
+                status="rejected",
+                summary={
+                    "dry_run": body.dry_run,
+                    "params": params,
+                    **_event_store_operation_lock_conflict_summary(exc),
+                },
             )
-            return response
+            raise HTTPException(status_code=409, detail=_event_store_operation_lock_conflict_detail(exc)) from exc
         except HTTPException as exc:
             _append_event_store_operation_record(
                 deps=deps,

@@ -58,7 +58,7 @@
 - release decision audit：把 approve/reject/defer、actor、备注和当时的 gate snapshot 写入 append-only event store
 - operations automation plan：聚合 monitor、alert delivery、promotion gate、tool audit、feedback、eval 证据，返回可执行 endpoint、scope、guardrail 和是否可自动执行，适合接 cron、值班机器人或发布前检查
 - audit export：把脱敏后的 event/tool audit/event-store operation 摘要导出为 NDJSON，方便接 SIEM 或 warehouse
-- event-store operation ledger：备份、恢复演练、保留策略预览/应用，以及通过鉴权后的拒绝/失败尝试都会写入独立台账；它不参与 retention high-water mark，所以不会让自己的 guard token 过期
+- event-store operation ledger + operation lock：备份、恢复演练、保留策略预览/应用会先获取 SQLite 租约锁，拒绝并发维护操作；完成、拒绝、失败都会写入独立台账；台账不参与 retention high-water mark，所以不会让自己的 guard token 过期
 - 从真实 monitor event 或 response feedback 生成 regression eval draft
 
 本地运行后打开：
@@ -427,7 +427,7 @@ python scripts/event_store_ops.py --database-url sqlite:///./data/production/sup
 
 `restore-drill` 会把备份复制到临时 SQLite 文件，执行 `quick_check`、schema 校验、健康写探针回滚、表计数和 tenant high-water mark 查询；默认不保留临时库，除非传 `--restore-output`。API 版本是 `POST /api/v1/admin/event-store/restore-drills`，需要 `admin:write`、`audit:read` 和 `events:read`，并且只接受备份接口返回的 `backup_token`，不会让调用方传任意文件路径。Console 的 Settings 页面也提供同一条链路：Create backup -> Run drill -> Preview retention -> Apply retention。`retention` 默认 dry-run，事件日志默认不会删除；只有显式加 `--include-events` 才会清理旧 message/run/monitor/eval 事件。API 版本是 `POST /api/v1/admin/event-store/retention`，需要同样的管理 scope。真正 apply 必须带服务端签发的 verified backup token、restore drill token、matching dry-run preview token 和显式确认；如果预演后 event store 有新写入或状态变化，后端会返回 `409 Conflict`，要求重新备份、恢复演练和预演。生产环境推荐用 Console/API 执行 apply；CLI 直连 `retention --apply` 默认拒绝并写入 `rejected` 台账，只有应急本地操作显式加 `--unsafe-local-apply` 才会绕过 API token 链路。
 
-`GET /api/v1/admin/event-store/operations` 是独立的运维台账接口，需要 `admin:read`、`audit:read` 和 `events:read`。它记录已鉴权操作者或 CLI `--actor-user-id`、operation、status、时间和安全摘要：备份只暴露文件名与路径哈希，恢复演练只暴露 token 哈希、表计数和 high-water 摘要，retention 只暴露参数、候选/删除计数和表级动作；原始 token 与完整文件路径不会进入台账。CLI 的 backup、restore-drill、retention preview/apply，以及失败或生产 guard 拒绝也会写同一张台账。台账表会被备份和恢复演练校验，但不会纳入 retention high-water mark，避免“写审计记录”让备份/预演 token 自己失效。
+`GET /api/v1/admin/event-store/operations` 是独立的运维台账接口，需要 `admin:read`、`audit:read` 和 `events:read`。它记录已鉴权操作者或 CLI `--actor-user-id`、operation、status、时间和安全摘要：备份只暴露文件名与路径哈希，恢复演练只暴露 token 哈希、表计数和 high-water 摘要，retention 只暴露参数、候选/删除计数和表级动作；原始 token 与完整文件路径不会进入台账。CLI 的 backup、restore-drill、retention preview/apply，以及失败或生产 guard 拒绝也会写同一张台账。API 和 CLI 共享 `event_store_operation_locks` 租约锁，同一个 tenant 同时只允许一个 event-store 维护操作；锁冲突返回 `409 Conflict` 或 CLI 非零退出，并在台账里记录 active operation、过期时间和 owner hash。锁 TTL 由 `APP_EVENT_STORE_OPERATION_LOCK_TTL_SECONDS` 控制，默认 1800 秒，进程崩溃后会自动过期。台账和锁表会被备份和恢复演练校验，但不会纳入 retention high-water mark，避免“写审计记录”或“持有锁”让备份/预演 token 自己失效。
 
 ## Docker
 

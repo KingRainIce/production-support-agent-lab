@@ -10,6 +10,7 @@ from typing import Any
 
 from support_agent_lab.config import Settings
 from support_agent_lab.memory.event_store import (
+    EventStoreOperationLockConflict,
     EventStoreRetentionReport,
     SQLiteBackupReport,
     SQLiteEventStore,
@@ -23,6 +24,7 @@ EVENT_STORE_OPERATION_RESTORE_DRILL = "restore_drill"
 EVENT_STORE_OPERATION_RETENTION_PREVIEW = "retention_preview"
 EVENT_STORE_OPERATION_RETENTION_APPLY = "retention_apply"
 EVENT_STORE_OPERATION_SUMMARY_VERSION = "event_store_operation_summary.v1"
+EVENT_STORE_MAINTENANCE_LOCK_NAME = "event_store_maintenance"
 
 
 def _load_event_store(database_url: str | None) -> SQLiteEventStore:
@@ -187,9 +189,24 @@ def _tenant_id_from_args(args: argparse.Namespace, settings: Settings) -> str:
 
 
 def _failure_status(exc: Exception) -> str:
-    if isinstance(exc, (FileExistsError, ValueError)):
+    if isinstance(exc, (EventStoreOperationLockConflict, FileExistsError, ValueError)):
         return "rejected"
     return "failed"
+
+
+def _operation_lock_owner(*, actor_user_id: str, operation: str) -> str:
+    return f"{actor_user_id or CLI_ACTOR_USER_ID}:{operation}:cli"
+
+
+def _operation_lock_conflict_summary(exc: EventStoreOperationLockConflict) -> dict[str, Any]:
+    active = exc.active_lock
+    return {
+        "lock_name": active.lock_name,
+        "active_operation": active.operation,
+        "active_owner_hash": _audit_hash(active.owner_id),
+        "active_acquired_at": active.acquired_at,
+        "active_expires_at": active.expires_at,
+    }
 
 
 def _failure_operation_summary(args: argparse.Namespace, exc: Exception) -> dict[str, Any]:
@@ -218,6 +235,12 @@ def _failure_operation_summary(args: argparse.Namespace, exc: Exception) -> dict
             "command": args.command,
             "dry_run": not args.apply,
             "params": _retention_params_from_args(args),
+        }
+    if isinstance(exc, EventStoreOperationLockConflict):
+        return {
+            **summary,
+            **_operation_lock_conflict_summary(exc),
+            **_operation_error_summary(exc),
         }
     return {
         **summary,
@@ -367,30 +390,37 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
             print(f"event store operation rejected: {exc}", file=sys.stderr)
             return 2
-        if args.command == "backup":
-            report = event_store.backup_to(
-                Path(args.output),
-                overwrite=args.overwrite,
-                verify=not args.no_verify,
-            )
-        elif args.command == "restore-drill":
-            report = event_store.restore_drill(
-                Path(args.backup),
-                restore_path=Path(args.restore_output) if args.restore_output else None,
-                overwrite=args.overwrite,
-                tenant_id=args.tenant_id,
-            )
-        else:
-            report = event_store.apply_retention_policy(
-                tenant_id=args.tenant_id,
-                dry_run=not args.apply,
-                include_events=args.include_events,
-                vacuum=args.vacuum,
-                event_retention_days=args.event_retention_days,
-                tool_audit_retention_days=args.tool_audit_retention_days,
-                idempotency_retention_days=args.idempotency_retention_days,
-                alert_delivery_retention_days=args.alert_delivery_retention_days,
-            )
+        with event_store.event_store_operation_lock(
+            tenant_id=tenant_id,
+            lock_name=EVENT_STORE_MAINTENANCE_LOCK_NAME,
+            operation=operation,
+            owner_id=_operation_lock_owner(actor_user_id=args.actor_user_id, operation=operation),
+            ttl_seconds=settings.app_event_store_operation_lock_ttl_seconds,
+        ):
+            if args.command == "backup":
+                report = event_store.backup_to(
+                    Path(args.output),
+                    overwrite=args.overwrite,
+                    verify=not args.no_verify,
+                )
+            elif args.command == "restore-drill":
+                report = event_store.restore_drill(
+                    Path(args.backup),
+                    restore_path=Path(args.restore_output) if args.restore_output else None,
+                    overwrite=args.overwrite,
+                    tenant_id=args.tenant_id,
+                )
+            else:
+                report = event_store.apply_retention_policy(
+                    tenant_id=args.tenant_id,
+                    dry_run=not args.apply,
+                    include_events=args.include_events,
+                    vacuum=args.vacuum,
+                    event_retention_days=args.event_retention_days,
+                    tool_audit_retention_days=args.tool_audit_retention_days,
+                    idempotency_retention_days=args.idempotency_retention_days,
+                    alert_delivery_retention_days=args.alert_delivery_retention_days,
+                )
         _append_operation_record(
             event_store=event_store,
             tenant_id=tenant_id,
