@@ -409,8 +409,9 @@ the event-store operation ledger.
 - Audit export via `GET /api/v1/admin/audit/export`. The BFF streams NDJSON
   summary rows from events, tool audit records, event-store operation ledger
   rows, and operations automation execution ledger rows; raw messages,
-  comments, tool arguments, automation command bodies, raw automation results,
-  operation tokens, full filesystem paths, and eval answers are not included.
+  comments, tool arguments, automation command paths, query values, bodies,
+  raw automation results, operation tokens, full filesystem paths, and eval
+  answers are not included.
   For unattended SIEM or warehouse ingestion, the production path is the
   `support-agent-audit-export-worker` batch plus manifest. The console reads
   `/api/v1/admin/audit/export-batches/summary` so operators can see whether the

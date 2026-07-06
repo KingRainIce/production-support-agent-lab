@@ -64,10 +64,18 @@ def test_audit_export_batch_writes_sanitized_ndjson_manifest_and_ledger(tmp_path
         "operations_automation_execution",
     }
     operation_row = next(row for row in rows if row["record_type"] == "event_store_operation")
+    automation_row = next(row for row in rows if row["record_type"] == "operations_automation_execution")
     assert "detail" not in operation_row["operation_summary"]
     assert "owner_id" not in operation_row["operation_summary"]
     assert operation_row["operation_summary"]["detail_hash"]
     assert operation_row["operation_summary"]["owner_id_hash"]
+    assert "path" not in automation_row["command_summary"]
+    assert "query" not in automation_row["command_summary"]
+    assert automation_row["command_summary"]["path_hash"]
+    assert automation_row["command_summary"]["query_keys"] == ["limit", "query"]
+    assert automation_row["command_summary"]["query_hash"]
+    assert "result_summary" not in automation_row
+    assert automation_row["result_summary_hash"]
     assert ledger.status == "completed"
     assert ledger.summary["output_file"] == report.output_file
     assert ledger.summary["output_path_hash"] == report.output_path_hash
@@ -84,6 +92,8 @@ def test_audit_export_batch_writes_sanitized_ndjson_manifest_and_ledger(tmp_path
     assert "operator_secret_should_not_export" not in combined
     assert "worker_secret_should_not_export" not in combined
     assert "summary_owner_secret" not in combined
+    assert "automation_query_secret" not in combined
+    assert "automation_result_secret" not in combined
     assert str(output_dir) not in combined
     assert not list(output_dir.glob("*.tmp"))
     assert not list(output_dir.glob(".*.tmp"))
@@ -422,12 +432,12 @@ def _seed_audit_rows(event_store: SQLiteEventStore) -> None:
         status="completed",
         safe_to_auto_execute=True,
         command_method="POST",
-        command_path="/api/v1/admin/knowledge/search",
-        command_query={},
+        command_path="/api/v1/admin/knowledge/search/private-ticket-A1001",
+        command_query={"query": "automation_query_secret", "limit": 3},
         command_body_keys=["limit", "query", "snippet_chars"],
         command_body_hash="body_hash_only",
         command_fingerprint="fingerprint_only",
-        result_summary="3 retrieval chunk(s) selected for diagnostics.",
+        result_summary="automation_result_secret",
         source="console",
         created_at=created_at,
     )

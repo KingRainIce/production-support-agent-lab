@@ -301,8 +301,11 @@ When the console BFF executes an `auto-safe` action, it also records
 authenticated actor, action kind, status, command method/path/query summary,
 body key list, body hash, result summary, and bounded error detail; it does not
 store raw command body, raw result payload, browser-supplied actor fields,
-signatures, tokens, tool arguments, or customer text. Audit export hashes the
-error detail instead of emitting it. Operators can list the same ledger through
+signatures, tokens, tool arguments, or customer text. SIEM/warehouse audit
+export is stricter than the admin ledger: it exports command method, query
+keys, body keys, path/query/body/result hashes, fingerprint, status, and
+correlation hashes, but not raw command path, query values, result summary,
+action id, actor, or error detail. Operators can list the same ledger through
 `GET /api/v1/admin/operations/automation-executions`, filtering by action kind,
 status, source, actor, time window, limit, and sort order; the console Settings
 panel uses that API for its execution-history view. The companion
@@ -329,9 +332,9 @@ user/conversation/run/action correlation ids, and summarizes only safe machine
 fields such as event type, status, rating, decision, operation name, action
 kind, command fingerprint, tool name, latency, error code, failure type, and
 policy code. It deliberately omits user text, feedback comments, tool
-arguments, raw operation tokens, raw automation command body, raw automation
-result payload, full filesystem paths, knowledge snippets, and eval answer
-text.
+arguments, raw operation tokens, raw automation command paths, query values,
+bodies, raw automation result payload, full filesystem paths, knowledge
+snippets, and eval answer text.
 
 For production SIEM or warehouse ingestion, run
 `support-agent-audit-export-worker --interval-seconds 86400 --json` or start
@@ -344,11 +347,12 @@ names, path hashes, SHA-256, byte count, record count, record-type counts,
 window/options, `previous_cursor`, `high_water_cursor`,
 `previous_source_cursors`, `source_high_water_cursors`,
 `cursor_advance_allowed`, and `partial`. It never stores full local paths,
-actor ids, user text, tool arguments, raw automation command bodies/results,
-or eval answers. By default, the next cycle reuses the latest compatible
-completed non-partial per-source cursors and exports only rows whose stable
-per-source `(created_at, record_type, source_sequence)` key is greater than
-that cursor. `source_sequence` is the SQLite rowid for that audit source, so a
+actor ids, user text, tool arguments, raw automation command paths, query
+values, bodies, raw automation results, or eval answers. By default, the next
+cycle reuses the latest compatible completed non-partial per-source cursors
+and exports only rows whose stable per-source
+`(created_at, record_type, source_sequence)` key is greater than that cursor.
+`source_sequence` is the SQLite rowid for that audit source, so a
 later insert with the same `created_at` and a lexically smaller business id is
 still exported. Any explicit `created_after` or `created_before` manual window
 disables cursor reuse; use `--no-incremental` for an intentional full rerun.

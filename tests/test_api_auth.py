@@ -2631,12 +2631,12 @@ def test_admin_can_export_sanitized_audit_ndjson(tmp_path, monkeypatch):
         status="completed",
         safe_to_auto_execute=True,
         command_method="POST",
-        command_path="/api/v1/admin/knowledge/search",
-        command_query={},
+        command_path="/api/v1/admin/knowledge/search/private-ticket-A1001",
+        command_query={"query": "PRIVATE query for order A1001", "limit": 3},
         command_body_keys=["limit", "query", "snippet_chars"],
         command_body_hash="body_hash_only",
         command_fingerprint="fingerprint_only",
-        result_summary="3 retrieval chunk(s) selected for diagnostics.",
+        result_summary="PRIVATE result summary for order A1001.",
         source="console",
         created_at=created_at,
     )
@@ -2720,9 +2720,17 @@ def test_admin_can_export_sanitized_audit_ndjson(tmp_path, monkeypatch):
     assert operation_row["correlation"]["user_hash"]
     assert automation_row["action_kind"] == "run_retrieval_diagnostics"
     assert automation_row["status"] == "completed"
+    assert "path" not in automation_row["command_summary"]
+    assert "query" not in automation_row["command_summary"]
+    assert automation_row["command_summary"]["path_hash"]
+    assert automation_row["command_summary"]["query_keys"] == ["limit", "query"]
+    assert automation_row["command_summary"]["query_hash"]
     assert automation_row["command_summary"]["body_keys"] == ["limit", "query", "snippet_chars"]
     assert automation_row["command_summary"]["body_hash"] == "body_hash_only"
     assert automation_row["command_summary"]["fingerprint"] == "fingerprint_only"
+    assert "result_summary" not in automation_row
+    assert automation_row["result_summary_hash"]
+    assert automation_row["result_summary_length"] == len("PRIVATE result summary for order A1001.")
     assert automation_row["correlation"]["user_hash"]
 
 
@@ -4605,6 +4613,8 @@ def test_admin_can_record_and_export_operations_automation_executions(tmp_path, 
     app_container = create_container()
     app.dependency_overrides[get_container] = lambda: app_container
     command_body_secret = "PRIVATE diagnostic text should be hashed only"
+    command_query_secret = "PRIVATE query text should be hashed only"
+    result_secret = "PRIVATE result summary should be hashed only"
     try:
         client = TestClient(app)
         recorded = client.post(
@@ -4619,10 +4629,10 @@ def test_admin_can_record_and_export_operations_automation_executions(tmp_path, 
                 "command": {
                     "method": "POST",
                     "path": "/api/v1/admin/knowledge/search",
-                    "query": {},
+                    "query": {"query": command_query_secret, "limit": 6},
                     "body": {"query": command_body_secret, "limit": 6, "snippet_chars": 300},
                 },
-                "result_summary": "3 retrieval chunk(s) selected for diagnostics.",
+                "result_summary": result_secret,
                 "source": "console",
             },
         )
@@ -4681,12 +4691,22 @@ def test_admin_can_record_and_export_operations_automation_executions(tmp_path, 
     assert exported.status_code == 200
     assert exported.headers["x-audit-export-records"] == "1"
     assert command_body_secret not in exported.text
+    assert command_query_secret not in exported.text
+    assert result_secret not in exported.text
     rows = [json.loads(line) for line in exported.text.splitlines()]
     assert rows[0]["record_type"] == "operations_automation_execution"
     assert rows[0]["action_id_hash"]
     assert "action_id" not in rows[0]
+    assert "path" not in rows[0]["command_summary"]
+    assert "query" not in rows[0]["command_summary"]
+    assert rows[0]["command_summary"]["path_hash"]
+    assert rows[0]["command_summary"]["query_keys"] == ["limit", "query"]
+    assert rows[0]["command_summary"]["query_hash"]
     assert rows[0]["command_summary"]["body_keys"] == ["limit", "query", "snippet_chars"]
     assert rows[0]["command_summary"]["body_hash"] == body["command_body_hash"]
+    assert "result_summary" not in rows[0]
+    assert rows[0]["result_summary_hash"]
+    assert rows[0]["result_summary_length"] == len(result_secret)
     assert excluded.status_code == 422
     assert excluded.json()["detail"] == "At least one audit source must be included"
 
