@@ -1324,6 +1324,17 @@ textarea:disabled {
   gap: 7px;
 }
 
+.automation-action-status {
+  border: 1px solid #bbf7d0;
+  border-radius: 6px;
+  background: #f0fdf4;
+  color: var(--green-800);
+  padding: 7px 8px;
+  font-size: 11px;
+  font-weight: 800;
+  overflow-wrap: anywhere;
+}
+
 .automation-action-row {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
@@ -1400,6 +1411,25 @@ textarea:disabled {
   gap: 4px;
   justify-items: end;
   align-content: start;
+}
+
+.automation-action-run-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  border: 1px solid #79b59d;
+  border-radius: 6px;
+  background: white;
+  color: var(--green-800);
+}
+
+.automation-action-run-button:disabled {
+  cursor: not-allowed;
+  border-color: var(--line);
+  color: #94a3b8;
+  background: #f8faf9;
 }
 
 .automation-action-meta span {

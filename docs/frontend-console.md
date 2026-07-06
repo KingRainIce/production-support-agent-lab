@@ -292,6 +292,11 @@ machine.
   regression-draft, retrieval, and staging-eval recommendations. Each action
   returns a runnable backend command plus scopes and guardrails, so teams can
   connect cron or an on-call bot without inventing a separate rules engine.
+  The Settings UI can run only server-generated `auto-safe` actions through
+  `POST /api/console/operations/automation-actions`: the BFF re-fetches the
+  current plan, matches the action id, rejects manual actions, and checks the
+  backend command against a small allowlist before forwarding it. Browser input
+  is never treated as an arbitrary admin proxy path.
 - Promotion decisions via `POST /api/v1/admin/promotion/decisions`. The backend
   recomputes the gate, stores the decision and gate snapshot as
   `release.promotion.decision`, and rejects non-override approval while the gate
@@ -345,6 +350,8 @@ memory, safety, monitoring, and incident response.
    ran it, when, against which run/alert context, and whether any cases failed.
 16. Use `Settings` before release: inspect `Release Preflight` and do not
    promote while readiness, monitor, tool-audit, feedback, or eval checks are blocked.
+   In `Operations Automation`, run only `auto-safe` actions from a fresh
+   snapshot; manual actions still require the normal operator workflow.
 17. Use `Settings` before manual cleanup: create a verified backup, preview
    retention, then apply only after reviewing the table-level candidate counts.
 18. Resolve only after the triage note explains customer impact and mitigation.

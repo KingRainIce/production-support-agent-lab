@@ -606,6 +606,17 @@ export type OperationsAutomationPlan = {
   guardrails: string[];
 };
 
+export type OperationsAutomationExecutionResult = {
+  schema_version: "ops_action_execution.v1";
+  action_id: string;
+  action_kind: OperationsAutomationAction["kind"];
+  title: string;
+  safe_to_auto_execute: boolean;
+  command: OperationsAutomationCommand;
+  result: JsonValue;
+  result_summary: string;
+};
+
 export type SloObjectiveResult = {
   name: string;
   status: "met" | "at_risk" | "breached" | "no_data";

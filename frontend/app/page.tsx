@@ -103,6 +103,7 @@ import type {
   MonitorDrilldownResponse,
   MonitorEvent,
   OperationsAutomationAction,
+  OperationsAutomationExecutionResult,
   OperationsAutomationPlan,
   PolicyFinding,
   PromotionDecision,
@@ -285,6 +286,8 @@ export default function Home() {
   const [eventBackupReport, setEventBackupReport] = useState<SQLiteBackupReport | null>(null);
   const [eventOpsBusy, setEventOpsBusy] = useState<string | null>(null);
   const [eventOpsError, setEventOpsError] = useState<string | null>(null);
+  const [automationActionBusyId, setAutomationActionBusyId] = useState<string | null>(null);
+  const [automationActionStatus, setAutomationActionStatus] = useState<string | null>(null);
   const [eventRetentionReport, setEventRetentionReport] = useState<EventStoreRetentionReport | null>(null);
   const [eventRetentionPreviewKey, setEventRetentionPreviewKey] = useState<string | null>(null);
   const [eventRetentionDays, setEventRetentionDays] = useState("365");
@@ -1330,6 +1333,58 @@ export default function Home() {
     }
   }
 
+  async function executeAutomationAction(action: OperationsAutomationAction) {
+    if (!action.command || !action.safe_to_auto_execute) {
+      setEventOpsError("Only auto-safe automation actions with backend commands can be executed from Settings.");
+      return;
+    }
+    if (!requireFreshSnapshot("Automation action")) {
+      return;
+    }
+    setEventOpsBusy("automation-action");
+    setAutomationActionBusyId(action.id);
+    setAutomationActionStatus(null);
+    setEventOpsError(null);
+    try {
+      const plan = snapshot?.operationsAutomation;
+      const response = await fetch("/api/console/operations/automation-actions", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        cache: "no-store",
+        body: JSON.stringify({
+          actionId: action.id,
+          source: plan?.source ?? snapshot?.monitorSource ?? "event_store",
+          window_hours: plan?.window_hours ?? 24
+        })
+      });
+      const data = await response.json();
+      if (!response.ok) {
+        throw new Error(data.detail ?? "Automation action failed");
+      }
+      const execution = data as OperationsAutomationExecutionResult;
+      setAutomationActionStatus(execution.result_summary);
+      if (action.kind === "dispatch_alert_deliveries") {
+        setAlertDeliveryDispatchReport(execution.result as unknown as AlertDispatchReport);
+        await loadAlertDeliveries(deliveryStatusFilter);
+      } else if (action.kind === "create_regression_draft") {
+        setRegressionDraft(execution.result as unknown as RegressionDraftResponse);
+      } else if (action.kind === "run_retrieval_diagnostics") {
+        setKnowledgeTrace(execution.result as unknown as KnowledgeSearchResponse);
+        setWorkspaceMode("knowledge");
+      }
+      await loadSnapshot({
+        runId: selectedRunId,
+        alertKey: selectedAlertKey,
+        preserveSelection: true
+      });
+    } catch (nextError) {
+      setEventOpsError(nextError instanceof Error ? nextError.message : "Automation action failed");
+    } finally {
+      setAutomationActionBusyId(null);
+      setEventOpsBusy(null);
+    }
+  }
+
   function loadCurrentRunRetrieval(trace: RetrievalTrace) {
     setKnowledgeTrace(toKnowledgeSearchResponse(trace));
     setKnowledgeQuery(trace.query);
@@ -2086,6 +2141,8 @@ export default function Home() {
               sloReport={snapshot?.sloReport ?? null}
               busy={eventOpsBusy}
               error={eventOpsError}
+              automationActionBusyId={automationActionBusyId}
+              automationActionStatus={automationActionStatus}
               promotionTargetVersion={promotionTargetVersion}
               promotionDecision={promotionDecision}
               promotionDecisionNote={promotionDecisionNote}
@@ -2121,6 +2178,7 @@ export default function Home() {
               onApplyConfirmed={setRetentionApplyConfirmed}
               onBackup={() => void createEventStoreBackup()}
               onPromotionDecisionSubmit={recordPromotionDecision}
+              onExecuteAutomationAction={(action) => void executeAutomationAction(action)}
               onAuditExport={() => void downloadAuditExport()}
               onRetention={(dryRun) => void runEventStoreRetention(dryRun)}
             />
@@ -3181,6 +3239,8 @@ function SettingsWorkbenchPanel({
   sloReport,
   busy,
   error,
+  automationActionBusyId,
+  automationActionStatus,
   promotionTargetVersion,
   promotionDecision,
   promotionDecisionNote,
@@ -3216,6 +3276,7 @@ function SettingsWorkbenchPanel({
   onApplyConfirmed,
   onBackup,
   onPromotionDecisionSubmit,
+  onExecuteAutomationAction,
   onAuditExport,
   onRetention
 }: {
@@ -3228,6 +3289,8 @@ function SettingsWorkbenchPanel({
   sloReport: SloReportResponse | null;
   busy: string | null;
   error: string | null;
+  automationActionBusyId: string | null;
+  automationActionStatus: string | null;
   promotionTargetVersion: string;
   promotionDecision: PromotionDecision;
   promotionDecisionNote: string;
@@ -3263,6 +3326,7 @@ function SettingsWorkbenchPanel({
   onApplyConfirmed: (value: boolean) => void;
   onBackup: () => void;
   onPromotionDecisionSubmit: (event: FormEvent<HTMLFormElement>) => void;
+  onExecuteAutomationAction: (action: OperationsAutomationAction) => void;
   onAuditExport: () => void;
   onRetention: (dryRun: boolean) => void;
 }) {
@@ -3413,31 +3477,60 @@ function SettingsWorkbenchPanel({
                 <span key={guardrail}>{guardrail}</span>
               ))}
             </div>
+            {automationActionStatus ? (
+              <div className="automation-action-status" role="status">
+                {automationActionStatus}
+              </div>
+            ) : null}
             <div className="automation-action-list">
-              {automationActions.slice(0, 6).map((action) => (
-                <div className={`automation-action-row state-${automationActionTone(action)}`} key={action.id}>
-                  <div className="automation-action-copy">
-                    <div className="automation-action-title">
-                      <Badge tone={automationPriorityTone(action.priority)}>{action.priority}</Badge>
-                      <strong>{action.title}</strong>
+              {automationActions.slice(0, 6).map((action) => {
+                const isRunning = automationActionBusyId === action.id;
+                const canExecute = Boolean(action.safe_to_auto_execute && action.command);
+                return (
+                  <div className={`automation-action-row state-${automationActionTone(action)}`} key={action.id}>
+                    <div className="automation-action-copy">
+                      <div className="automation-action-title">
+                        <Badge tone={automationPriorityTone(action.priority)}>{action.priority}</Badge>
+                        <strong>{action.title}</strong>
+                      </div>
+                      <span>{action.detail}</span>
+                      {action.command ? (
+                        <code>
+                          {action.command.method} {action.command.path}
+                        </code>
+                      ) : null}
                     </div>
-                    <span>{action.detail}</span>
-                    {action.command ? (
-                      <code>
-                        {action.command.method} {action.command.path}
-                      </code>
-                    ) : null}
+                    <div className="automation-action-meta">
+                      <button
+                        type="button"
+                        className="automation-action-run-button"
+                        disabled={!canExecute || Boolean(busy)}
+                        onClick={() => onExecuteAutomationAction(action)}
+                        title={
+                          canExecute
+                            ? "Run this auto-safe backend command"
+                            : "Manual action; follow the linked workflow instead"
+                        }
+                        aria-label={`Run automation action: ${action.title}`}
+                      >
+                        {isRunning ? (
+                          <Loader2 className="spin" size={14} />
+                        ) : canExecute ? (
+                          <Play size={14} />
+                        ) : (
+                          <ShieldCheck size={14} />
+                        )}
+                      </button>
+                      <Badge tone={action.safe_to_auto_execute ? "success" : "warn"}>
+                        {action.safe_to_auto_execute ? "auto-safe" : "manual"}
+                      </Badge>
+                      {action.required_scopes.slice(0, 3).map((scope) => (
+                        <span key={scope}>{scope}</span>
+                      ))}
+                    </div>
                   </div>
-                  <div className="automation-action-meta">
-                    <Badge tone={action.safe_to_auto_execute ? "success" : "warn"}>
-                      {action.safe_to_auto_execute ? "auto-safe" : "manual"}
-                    </Badge>
-                    {action.required_scopes.slice(0, 3).map((scope) => (
-                      <span key={scope}>{scope}</span>
-                    ))}
-                  </div>
-                </div>
-              ))}
+                );
+              })}
             </div>
           </>
         ) : (
